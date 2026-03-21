@@ -139,8 +139,8 @@ Each regime also adjusts stop-loss/take-profit multipliers, minimum confidence t
 ### 1. Clone and Install
 
 ```bash
-git clone https://github.com/your-username/aria.git
-cd aria
+git clone https://github.com/loopotv/aria-trading.git
+cd aria-trading
 npm install
 ```
 
