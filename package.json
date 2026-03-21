@@ -1,0 +1,29 @@
+{
+  "name": "binance-trading-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "backtest:fetch": "npx tsx backtest/data-fetcher.ts",
+    "backtest:run": "npx tsx backtest/runner.ts",
+    "backtest:fetch-sentiment": "npx tsx backtest/sentiment-data-fetcher.ts",
+    "backtest:market-neutral": "npx tsx backtest/market-neutral-runner.ts",
+    "backtest:fetch-events": "npx tsx backtest/event-driven-data-fetcher.ts",
+    "backtest:event-driven": "npx tsx backtest/event-driven-runner.ts"
+  },
+  "dependencies": {
+    "hono": "^4.7.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250313.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "wrangler": "^4.0.0"
+  }
+}

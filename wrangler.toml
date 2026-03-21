@@ -1,0 +1,26 @@
+name = "binance-trading-bot"
+main = "src/index.ts"
+compatibility_date = "2026-03-01"
+
+# Cron: every 5 minutes (collect + process + trade)
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+ENVIRONMENT = "testnet"
+BOT_ACTIVE = "true"
+
+# KV namespace for persistent cost tracking
+[[kv_namespaces]]
+binding = "COSTS"
+id = "1720eee70b314603a642a9117d5ac32c"
+
+# Workers AI binding for Llama 4 Scout (free tier)
+[ai]
+binding = "AI"
+
+# D1 Database for experience memory
+[[d1_databases]]
+binding = "DB"
+database_name = "trading-experience"
+database_id = "1807db45-e6ba-4f4c-87a8-55706251eda4"
