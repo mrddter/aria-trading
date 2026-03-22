@@ -294,6 +294,53 @@ app.post('/webhook/telegram/:secret', async (c) => {
         break;
       }
 
+      case '/closeold': {
+        // One-time command: close old positions without SL/TP and clean D1
+        const binance = new BinanceFuturesClient({
+          BINANCE_API_KEY: c.env.BINANCE_API_KEY,
+          BINANCE_API_SECRET: c.env.BINANCE_API_SECRET,
+          ENVIRONMENT: c.env.ENVIRONMENT,
+        });
+
+        const toClose = [
+          { symbol: 'PENDLEUSDT', side: 'BUY' as const, positionSide: 'SHORT' as const, qty: 411 },
+          { symbol: 'TAOUSDT', side: 'SELL' as const, positionSide: 'LONG' as const, qty: 1.835 },
+          { symbol: 'PAXGUSDT', side: 'BUY' as const, positionSide: 'SHORT' as const, qty: 0.107 },
+        ];
+
+        let closeMsg = '🧹 <b>Closing old positions...</b>\n\n';
+        for (const p of toClose) {
+          try {
+            await binance.newOrder({
+              symbol: p.symbol,
+              side: p.side,
+              positionSide: p.positionSide,
+              type: 'MARKET',
+              quantity: p.qty,
+            });
+            closeMsg += `✅ ${p.positionSide} ${p.symbol} — closed\n`;
+          } catch (e) {
+            closeMsg += `❌ ${p.positionSide} ${p.symbol} — ${(e as Error).message?.slice(0, 80)}\n`;
+          }
+        }
+
+        // Clean D1: mark orphan trades as CLOSED
+        if (c.env.DB) {
+          const db = c.env.DB;
+          const orphanIds = [14, 15, 16, 17, 18]; // HYPE, PAXG, SOL, old BTC, HBAR
+          // Also close PENDLE and TAO (not in D1 but the Binance positions)
+          for (const id of orphanIds) {
+            await db.prepare(
+              `UPDATE trades SET status = 'CLOSED', closed_at = datetime('now'), pnl = 0 WHERE id = ? AND status = 'OPEN'`
+            ).bind(id).run();
+          }
+          closeMsg += `\n🗃 D1: marked ${orphanIds.length} orphan trades as CLOSED`;
+        }
+
+        await telegram.sendMessage(closeMsg);
+        break;
+      }
+
       case '/stop': {
         await telegram.sendMessage(
           '⚠️ Runtime toggle is not supported. Use the Cloudflare dashboard to set <code>BOT_ACTIVE=false</code>.'
