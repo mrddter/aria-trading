@@ -501,12 +501,11 @@ export default {
         }
       }
 
-      // 5. Auto audit — alert only on critical/warning issues
+      // 5. Auto audit — reuse engine's exchange client (shares cache, avoids rate limits)
       if (env.DB) {
         try {
-          const auditBinance = createExchange(env);
           const auditExp = new ExperienceDB(env.DB);
-          const auditReport = await runAudit(auditBinance, auditExp, getSoftOrderKeys(), getStartingBalance(env));
+          const auditReport = await runAudit(eng.getExchange(), auditExp, getSoftOrderKeys(), getStartingBalance(env));
           const alert = formatAuditAlert(auditReport.issues);
           if (alert) {
             const auditTelegram = new TelegramBot(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID);

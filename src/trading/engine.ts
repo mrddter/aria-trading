@@ -110,6 +110,11 @@ export class TradingEngine {
     this.cachedAccountTs = 0;
   }
 
+  /** Expose exchange client for audit (avoids creating a new client) */
+  getExchange(): IExchange {
+    return this.exchange;
+  }
+
   /**
    * Main cycle - called by cron every 2 minutes.
    * 1. Collect news events
