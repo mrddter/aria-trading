@@ -376,14 +376,26 @@ export class TradingEngine {
 
     const symbol = signal.asset + 'USDT';
 
-    // Check if symbol exists on Binance (dynamic, from exchangeInfo)
+    // Check if symbol exists on exchange
     if (!this.exchange.isSymbolAvailable(symbol)) {
-      console.log(`[Event] ${symbol} not available on Binance, skipping trade`);
+      console.log(`[Event] ${symbol} not available on ${this.exchange.name}, skipping trade`);
       return;
     }
 
     // Get kline data for quant filter
     const klines = await this.exchange.getKlines(symbol, '1h', 48);
+
+    // Volume filter: require minimum 24h notional volume ($5M)
+    const last24hKlines = klines.slice(-24);
+    const last24hCloses = last24hKlines.map((k: any) => parseFloat(k[4]));
+    const last24hVols = last24hKlines.map((k: any) => parseFloat(k[5]));
+    const notionalVol24h = last24hCloses.reduce((sum, c, i) => sum + c * last24hVols[i], 0);
+    const MIN_VOLUME_24H = 5_000_000; // $5M minimum
+    if (notionalVol24h < MIN_VOLUME_24H) {
+      console.log(`[Event] ${symbol} 24h volume $${(notionalVol24h / 1e6).toFixed(1)}M below min $${MIN_VOLUME_24H / 1e6}M, skipping`);
+      return;
+    }
+
     const highs = klines.map((k: any) => parseFloat(k[2]));
     const lows = klines.map((k: any) => parseFloat(k[3]));
     const closes = klines.map((k: any) => parseFloat(k[4]));
