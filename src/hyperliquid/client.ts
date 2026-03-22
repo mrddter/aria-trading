@@ -222,18 +222,24 @@ export class HyperliquidClient implements IExchange {
     });
 
     // Unified account: perps balance may be 0, check spot balance too
-    let walletBalance = parseFloat(state.marginSummary.accountValue);
-    let availableBalance = parseFloat(state.withdrawable);
+    let walletBalance = parseFloat(state.marginSummary.accountValue || '0');
+    let availableBalance = parseFloat(state.withdrawable || '0');
+    console.log(`[Hyperliquid] Perps balance: ${walletBalance}, user: ${this.userAddress}`);
 
     if (walletBalance === 0) {
-      const spotState = await this.infoPost<{ balances: Array<{ coin: string; total: string }> }>({
-        type: 'spotClearinghouseState',
-        user: this.userAddress,
-      });
-      const usdcBalance = spotState.balances?.find(b => b.coin === 'USDC');
-      if (usdcBalance) {
-        walletBalance = parseFloat(usdcBalance.total);
-        availableBalance = walletBalance;
+      try {
+        const spotState = await this.infoPost<{ balances: Array<{ coin: string; total: string }> }>({
+          type: 'spotClearinghouseState',
+          user: this.userAddress,
+        });
+        console.log(`[Hyperliquid] Spot balances: ${JSON.stringify(spotState.balances?.map(b => `${b.coin}:${b.total}`))}`);
+        const usdcBalance = spotState.balances?.find(b => b.coin === 'USDC');
+        if (usdcBalance) {
+          walletBalance = parseFloat(usdcBalance.total);
+          availableBalance = walletBalance;
+        }
+      } catch (e) {
+        console.error(`[Hyperliquid] Spot balance fetch failed: ${(e as Error).message}`);
       }
     }
 
