@@ -517,6 +517,8 @@ export class TradingEngine {
       }
     }
 
+    console.log(`[Event] Strategist done, proceeding to trade execution for ${symbol}...`);
+
     // Check position limits
     const account = await this.getAccount();
     const openCount = account.positions.filter(
@@ -533,6 +535,7 @@ export class TradingEngine {
     }
 
     // Execute trade
+    console.log(`[Event] Executing trade: ${setup.direction} ${symbol}, balance: ${account.availableBalance}`);
     const balance = parseFloat(account.availableBalance);
     await this.executeTrade(symbol, setup.direction, currentPrice, setup.stopLoss, setup.takeProfit, balance, 'event-driven', signal);
   }

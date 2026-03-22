@@ -32,7 +32,8 @@ export async function callQwenStrategist(
   const start = Date.now();
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25_000); // 25s timeout
+  const timeoutMs = 15_000; // 15s timeout — Workers have limited execution time
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   let response: Response;
   try {
@@ -59,6 +60,12 @@ export async function callQwenStrategist(
       }),
       signal: controller.signal,
     });
+  } catch (fetchErr) {
+    clearTimeout(timeout);
+    if ((fetchErr as Error).name === 'AbortError') {
+      throw new Error(`NVIDIA API timeout after ${timeoutMs}ms`);
+    }
+    throw fetchErr;
   } finally {
     clearTimeout(timeout);
   }
