@@ -506,8 +506,9 @@ export default {
         }
       }
 
-      // 5. Auto audit — reuse engine's exchange client (shares cache, avoids rate limits)
-      if (env.DB) {
+      // 5. Auto audit — only run every 30 min (Hyperliquid rate limits aggressively)
+      const minuteNow = new Date().getMinutes();
+      if (env.DB && minuteNow < 5) { // runs once per ~30min (at :00 and :30)
         try {
           const auditExp = new ExperienceDB(env.DB);
           const auditReport = await runAudit(eng.getExchange(), auditExp, getSoftOrderKeys(), getStartingBalance(env));
