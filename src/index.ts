@@ -148,9 +148,9 @@ app.post('/webhook/telegram/:secret', async (c) => {
           const mark = parseFloat(p.markPrice);
           const decimals = entry >= 100 ? 2 : entry >= 1 ? 4 : 6;
 
-          // Get SL/TP/leverage from D1
+          // Get SL/TP/leverage from D1 or Binance (v3 may use 'initialLeverage')
           const trade = tradeMap.get(`${p.symbol}:${direction}`);
-          const lev = p.leverage || trade?.leverage || '?';
+          const lev = p.leverage || (p as any).initialLeverage || trade?.leverage || '?';
           const sl = trade?.stop_loss;
           const tp = trade?.take_profit;
 

@@ -146,7 +146,15 @@ export class BinanceFuturesClient {
     unRealizedProfit: string; liquidationPrice: string;
   }>> {
     const all = await this.signedGet('/fapi/v3/positionRisk') as any[];
-    return all.filter((p: any) => parseFloat(p.positionAmt) !== 0);
+    const open = all.filter((p: any) => parseFloat(p.positionAmt) !== 0);
+    // v3 API may use different field names - normalize
+    for (const p of open) {
+      if (!p.unRealizedProfit && p.unrealizedProfit) p.unRealizedProfit = p.unrealizedProfit;
+    }
+    if (open.length > 0 && !open[0].leverage) {
+      console.log(`[Binance] positionRisk sample fields: ${Object.keys(open[0]).join(', ')}`);
+    }
+    return open;
   }
 
   async newOrder(params: NewOrderParams) {
