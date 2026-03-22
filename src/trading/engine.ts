@@ -425,8 +425,13 @@ export class TradingEngine {
         };
         let decision = extractJson(strategistResult.text) as StrategistDecision | null;
         if (!decision && strategistResult.thinkingText) {
-          console.log(`[Strategist] No JSON in content, trying thinking text...`);
+          console.log(`[Strategist] No JSON in content (len=${strategistResult.text?.length}), trying thinking (len=${strategistResult.thinkingText?.length})...`);
           decision = extractJson(strategistResult.thinkingText) as StrategistDecision | null;
+        }
+        if (!decision) {
+          // Log what we got for debugging
+          console.log(`[Strategist] JSON extraction FAILED. Content: ${strategistResult.text?.slice(0, 500)}`);
+          console.log(`[Strategist] Thinking tail: ${strategistResult.thinkingText?.slice(-500)}`);
         }
 
         console.log(`[Strategist] Parsed decision: ${JSON.stringify(decision)?.slice(0, 300)}`);
@@ -488,7 +493,11 @@ export class TradingEngine {
     ).length;
 
     if (openCount >= this.config.maxPositions) {
-      console.log('[Event] Max positions reached');
+      console.log(`[Event] Max positions reached (${openCount}/${this.config.maxPositions})`);
+      await this.telegram.sendMessage(
+        `⏸ <b>${symbol} ${setup.direction} SKIPPED</b>\n` +
+        `Max positions reached (${openCount}/${this.config.maxPositions})`
+      );
       return;
     }
 

@@ -269,50 +269,56 @@ export async function callWaveSpeed(
 export function extractJson<T>(text: string, schema?: ZodSchema<T>): T | null {
   if (!text || typeof text !== 'string') return null;
 
-  // Try full response as JSON first (trim whitespace)
-  try {
-    const parsed = JSON.parse(text.trim());
-    if (schema) {
-      const result = schema.safeParse(parsed);
-      return result.success ? result.data : null;
-    }
-    return parsed as T;
-  } catch {
-    // Fall through to regex extraction
-  }
-
-  // Extract JSON object from text (supports multi-line and nested)
-  const jsonStart = text.indexOf('{');
-  const jsonEnd = text.lastIndexOf('}');
-  if (jsonStart !== -1 && jsonEnd > jsonStart) {
+  const tryParse = (str: string): T | null => {
     try {
-      const parsed = JSON.parse(text.slice(jsonStart, jsonEnd + 1));
+      const parsed = JSON.parse(str);
       if (schema) {
         const result = schema.safeParse(parsed);
         return result.success ? result.data : null;
       }
       return parsed as T;
     } catch {
-      // Fall through
+      return null;
+    }
+  };
+
+  // Stage 1: Try full response as JSON
+  const full = tryParse(text.trim());
+  if (full) return full;
+
+  // Stage 2: Extract from markdown code blocks (```json ... ``` or ``` ... ```)
+  const codeBlockMatches = text.match(/```(?:json)?\s*([\s\S]*?)```/g);
+  if (codeBlockMatches) {
+    for (const block of codeBlockMatches) {
+      const inner = block.replace(/```(?:json)?\s*/, '').replace(/```$/, '').trim();
+      const parsed = tryParse(inner);
+      if (parsed) return parsed;
     }
   }
 
-  // Fallback: try simple non-nested regex
-  const matches = text.match(/\{[^{}]*\}/g);
-  if (!matches) return null;
+  // Stage 3: Extract JSON object from text (first { to last })
+  const jsonStart = text.indexOf('{');
+  const jsonEnd = text.lastIndexOf('}');
+  if (jsonStart !== -1 && jsonEnd > jsonStart) {
+    const parsed = tryParse(text.slice(jsonStart, jsonEnd + 1));
+    if (parsed) return parsed;
+  }
 
-  // Try from last match (most likely the actual JSON)
-  for (let i = matches.length - 1; i >= 0; i--) {
-    try {
-      const parsed = JSON.parse(matches[i]);
-      if (schema) {
-        const result = schema.safeParse(parsed);
-        if (result.success) return result.data;
-      } else {
-        return parsed as T;
-      }
-    } catch {
-      continue;
+  // Stage 4: Try each non-nested {...} block (last match first)
+  const matches = text.match(/\{[^{}]*\}/g);
+  if (matches) {
+    for (let i = matches.length - 1; i >= 0; i--) {
+      const parsed = tryParse(matches[i]);
+      if (parsed) return parsed;
+    }
+  }
+
+  // Stage 5: Try to find JSON with "execute" key specifically (strategist response)
+  const executeMatch = text.match(/\{[^{}]*"execute"\s*:\s*(?:true|false)[^{}]*\}/g);
+  if (executeMatch) {
+    for (const m of executeMatch) {
+      const parsed = tryParse(m);
+      if (parsed) return parsed;
     }
   }
 
