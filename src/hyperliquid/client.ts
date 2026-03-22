@@ -12,6 +12,7 @@ import type { HlMeta, HlClearinghouseState, HlCandle, HlFill, HlOrderResponse } 
 
 export interface HyperliquidEnv {
   privateKey: string;
+  walletAddress?: string; // Main wallet address (if using API wallet)
   vaultAddress?: string;
   isTestnet: boolean;
 }
@@ -19,7 +20,8 @@ export interface HyperliquidEnv {
 export class HyperliquidClient implements IExchange {
   readonly name = 'Hyperliquid';
   private privateKey: string;
-  private address: string;
+  private address: string;       // API wallet address (signs transactions)
+  private userAddress: string;   // Main wallet address (holds funds)
   private vaultAddress?: string;
   private isTestnet: boolean;
   private baseUrl: string;
@@ -42,12 +44,13 @@ export class HyperliquidClient implements IExchange {
 
     this.privateKey = pk;
     this.address = privateKeyToAddress(this.privateKey);
+    this.userAddress = env.walletAddress || this.address;
     this.vaultAddress = env.vaultAddress;
     this.isTestnet = env.isTestnet;
     this.baseUrl = env.isTestnet
       ? 'https://api.hyperliquid-testnet.xyz'
       : 'https://api.hyperliquid.xyz';
-    console.log(`[Hyperliquid] Initialized for ${this.address} (${env.isTestnet ? 'testnet' : 'mainnet'})`);
+    console.log(`[Hyperliquid] API wallet: ${this.address}, User wallet: ${this.userAddress} (${env.isTestnet ? 'testnet' : 'mainnet'})`);
   }
 
   // --- Helpers ---
@@ -215,7 +218,7 @@ export class HyperliquidClient implements IExchange {
   async getAccountInfo(): Promise<AccountInfo> {
     const state = await this.infoPost<HlClearinghouseState>({
       type: 'clearinghouseState',
-      user: this.address,
+      user: this.userAddress,
     });
 
     const totalUnrealized = state.assetPositions.reduce(
@@ -246,7 +249,7 @@ export class HyperliquidClient implements IExchange {
   async getPositionRisk(): Promise<PositionRiskEntry[]> {
     const state = await this.infoPost<HlClearinghouseState>({
       type: 'clearinghouseState',
-      user: this.address,
+      user: this.userAddress,
     });
 
     return state.assetPositions
@@ -390,7 +393,7 @@ export class HyperliquidClient implements IExchange {
   async getOpenOrders(symbol?: string): Promise<any[]> {
     const result = await this.infoPost<any[]>({
       type: 'openOrders',
-      user: this.address,
+      user: this.userAddress,
     });
     if (symbol) {
       const coin = this.toHlSymbol(symbol);
@@ -402,7 +405,7 @@ export class HyperliquidClient implements IExchange {
   async getUserTrades(symbol?: string, limit?: number): Promise<any[]> {
     const fills = await this.infoPost<HlFill[]>({
       type: 'userFills',
-      user: this.address,
+      user: this.userAddress,
       aggregateByTime: false,
     });
 

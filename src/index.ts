@@ -22,6 +22,7 @@ type Bindings = {
   BINANCE_API_KEY: string;
   BINANCE_API_SECRET: string;
   HL_PRIVATE_KEY?: string;
+  HL_WALLET_ADDRESS?: string;
   HL_VAULT_ADDRESS?: string;
   HL_TESTNET?: string;
   WAVESPEED_API_KEY: string;

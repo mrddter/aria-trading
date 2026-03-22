@@ -13,6 +13,7 @@ export interface ExchangeEnv {
   BINANCE_API_SECRET?: string;
   // Hyperliquid
   HL_PRIVATE_KEY?: string;
+  HL_WALLET_ADDRESS?: string;
   HL_VAULT_ADDRESS?: string;
   HL_TESTNET?: string;
   // Common
@@ -39,6 +40,7 @@ export function createExchange(env: ExchangeEnv): IExchange {
       }
       return new HyperliquidClient({
         privateKey: env.HL_PRIVATE_KEY,
+        walletAddress: env.HL_WALLET_ADDRESS,
         vaultAddress: env.HL_VAULT_ADDRESS,
         isTestnet: env.HL_TESTNET === 'true' || env.ENVIRONMENT === 'testnet',
       });
