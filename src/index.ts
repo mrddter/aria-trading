@@ -53,9 +53,19 @@ app.get('/health', (c) => {
 
 // Account info (for debugging)
 app.get('/account', async (c) => {
-  const binance = createExchange(c.env);
+  const exchange = createExchange(c.env);
   try {
-    const account = await binance.getAccountInfo();
+    // Direct spot test for debugging
+    if (c.env.EXCHANGE === 'hyperliquid' && c.env.HL_WALLET_ADDRESS) {
+      const spotRes = await fetch('https://api.hyperliquid.xyz/info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'spotClearinghouseState', user: c.env.HL_WALLET_ADDRESS }),
+      });
+      const spotData = await spotRes.json() as any;
+      console.log(`[Debug] Direct spot fetch: ${JSON.stringify(spotData).slice(0, 300)}`);
+    }
+    const account = await exchange.getAccountInfo();
     const positions = account.positions.filter(
       (p: any) => parseFloat(p.positionAmt) !== 0
     );
