@@ -42,7 +42,7 @@ export function createExchange(env: ExchangeEnv): IExchange {
         privateKey: env.HL_PRIVATE_KEY,
         walletAddress: env.HL_WALLET_ADDRESS,
         vaultAddress: env.HL_VAULT_ADDRESS,
-        isTestnet: env.HL_TESTNET === 'true' || env.ENVIRONMENT === 'testnet',
+        isTestnet: env.HL_TESTNET === 'true',
       });
 
     default:
