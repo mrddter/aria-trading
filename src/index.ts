@@ -60,6 +60,8 @@ app.get('/account', async (c) => {
       (p: any) => parseFloat(p.positionAmt) !== 0
     );
     return c.json({
+      exchange: c.env.EXCHANGE || 'binance',
+      walletAddress: c.env.HL_WALLET_ADDRESS || 'not set',
       balance: account.totalWalletBalance,
       unrealizedPnl: account.totalUnrealizedProfit,
       available: account.availableBalance,
