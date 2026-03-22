@@ -8,8 +8,7 @@
  * - Event-Driven (real-time on high-impact news)
  */
 
-import { BinanceFuturesClient } from '../binance/client';
-import type { AccountInfo } from '../binance/types';
+import type { IExchange, AccountInfo } from '../exchange/types';
 import { TelegramBot } from '../telegram/bot';
 import { collectEvents, classifyImpact } from '../ingestion/collector';
 import { processHighImpactItem, processBatch } from '../sentiment/llm-sensor';
@@ -57,7 +56,7 @@ export function getSoftOrderKeys(): string[] {
 }
 
 export class TradingEngine {
-  private binance: BinanceFuturesClient;
+  private exchange: IExchange;
   private telegram: TelegramBot;
   private wavespeedKey: string;
   private config: EngineConfig;
@@ -77,7 +76,7 @@ export class TradingEngine {
   private cachedAccountTs = 0;
 
   constructor(
-    binance: BinanceFuturesClient,
+    exchange: IExchange,
     telegram: TelegramBot,
     wavespeedKey: string,
     config: EngineConfig,
@@ -85,7 +84,7 @@ export class TradingEngine {
     db?: D1Database,
     nvidiaKey?: string
   ) {
-    this.binance = binance;
+    this.exchange = exchange;
     this.telegram = telegram;
     this.wavespeedKey = wavespeedKey;
     this.config = config;
@@ -100,7 +99,7 @@ export class TradingEngine {
     if (!forceRefresh && this.cachedAccount && now - this.cachedAccountTs < 30_000) {
       return this.cachedAccount;
     }
-    this.cachedAccount = await this.binance.getAccountInfo();
+    this.cachedAccount = await this.exchange.getAccountInfo();
     this.cachedAccountTs = now;
     return this.cachedAccount;
   }
@@ -122,7 +121,7 @@ export class TradingEngine {
     console.log(`[Engine] Cycle start: ${new Date().toISOString()}`);
 
     // Load exchange info for dynamic precision (cached after first call)
-    await this.binance.loadExchangeInfo();
+    await this.exchange.loadExchangeInfo();
 
     try {
       // 1. Collect events (seenIds only works within same isolate)
@@ -146,7 +145,7 @@ export class TradingEngine {
 
       // Detect market regime
       try {
-        const btcTicker = await this.binance.publicGet('/fapi/v1/ticker/24hr', { symbol: 'BTCUSDT' }) as { priceChangePercent?: string };
+        const btcTicker = await this.exchange.getTicker24hr('BTCUSDT');
         const btcChange = parseFloat(btcTicker?.priceChangePercent || '0');
         const regimeInput = {
           fearGreedValue: fearGreed.value,
@@ -292,7 +291,7 @@ export class TradingEngine {
 
     console.log('[Engine] Market-Neutral rebalance start');
 
-    await this.binance.loadExchangeInfo();
+    await this.exchange.loadExchangeInfo();
 
     try {
       // Get current account state
@@ -373,13 +372,13 @@ export class TradingEngine {
     const symbol = signal.asset + 'USDT';
 
     // Check if symbol exists on Binance (dynamic, from exchangeInfo)
-    if (!this.binance.isSymbolAvailable(symbol)) {
+    if (!this.exchange.isSymbolAvailable(symbol)) {
       console.log(`[Event] ${symbol} not available on Binance, skipping trade`);
       return;
     }
 
     // Get kline data for quant filter
-    const klines = await this.binance.getKlines(symbol, '1h', 48);
+    const klines = await this.exchange.getKlines(symbol, '1h', 48);
     const highs = klines.map((k: any) => parseFloat(k[2]));
     const lows = klines.map((k: any) => parseFloat(k[3]));
     const closes = klines.map((k: any) => parseFloat(k[4]));
@@ -490,11 +489,11 @@ export class TradingEngine {
 
         // Apply strategist adjustments
         if (decision?.adjustedSL && decision.adjustedSL > 0) {
-          setup.stopLoss = this.binance.roundPrice(symbol, decision.adjustedSL);
+          setup.stopLoss = this.exchange.roundPrice(symbol, decision.adjustedSL);
           console.log(`[Strategist] Adjusted SL: $${setup.stopLoss}`);
         }
         if (decision?.adjustedTP && decision.adjustedTP > 0) {
-          setup.takeProfit = this.binance.roundPrice(symbol, decision.adjustedTP);
+          setup.takeProfit = this.exchange.roundPrice(symbol, decision.adjustedTP);
           console.log(`[Strategist] Adjusted TP: $${setup.takeProfit}`);
         }
 
@@ -549,7 +548,7 @@ export class TradingEngine {
     const symbol = snap.asset + 'USDT';
 
     // Verify symbol exists on exchange
-    if (!this.binance.isSymbolAvailable(symbol)) {
+    if (!this.exchange.isSymbolAvailable(symbol)) {
       console.log(`[MktNeutral] ${symbol} not available on exchange, skipping`);
       return;
     }
@@ -562,7 +561,7 @@ export class TradingEngine {
     if (hasPosition) return;
 
     // Get kline data for quant filter
-    const klines = await this.binance.getKlines(symbol, '1h', 48);
+    const klines = await this.exchange.getKlines(symbol, '1h', 48);
     const highs = klines.map((k: any) => parseFloat(k[2]));
     const lows = klines.map((k: any) => parseFloat(k[3]));
     const closes = klines.map((k: any) => parseFloat(k[4]));
@@ -646,19 +645,19 @@ export class TradingEngine {
       }
 
       // Verify symbol exists on exchange
-      if (!this.binance.isSymbolAvailable(symbol)) {
+      if (!this.exchange.isSymbolAvailable(symbol)) {
         console.log(`[Trade] ${symbol} not available on exchange, skipping`);
         return;
       }
 
       const rawQty = posSize / price;
-      let quantity = this.binance.roundQuantity(symbol, rawQty);
-      const roundedSL = this.binance.roundPrice(symbol, stopLoss);
-      const roundedTP = this.binance.roundPrice(symbol, takeProfit);
+      let quantity = this.exchange.roundQuantity(symbol, rawQty);
+      const roundedSL = this.exchange.roundPrice(symbol, stopLoss);
+      const roundedTP = this.exchange.roundPrice(symbol, takeProfit);
       const side = direction === 'LONG' ? 'BUY' : 'SELL';
 
       // Clamp to max quantity allowed by Binance
-      const info = this.binance.getSymbolPrecision(symbol);
+      const info = this.exchange.getSymbolPrecision(symbol);
       if (info && quantity > info.maxQty) {
         console.log(`[Trade] ${symbol} qty ${quantity} exceeds maxQty ${info.maxQty}, clamping`);
         quantity = info.maxQty;
@@ -676,12 +675,12 @@ export class TradingEngine {
       }
 
       // Set leverage (regime-adjusted)
-      await this.binance.setLeverage(symbol, effectiveLeverage);
+      await this.exchange.setLeverage(symbol, effectiveLeverage);
 
       // Place MARKET order
       console.log(`[Trade] ${side} ${symbol} qty=${quantity} @ ~$${price.toFixed(4)} lev=${effectiveLeverage}x risk=${effectiveRisk.toFixed(1)}% regime=${regime?.regime || 'none'}`);
 
-      const order = await this.binance.newOrder({
+      const order = await this.exchange.newOrder({
         symbol,
         side: side as 'BUY' | 'SELL',
         positionSide: direction as 'LONG' | 'SHORT',
@@ -710,7 +709,7 @@ export class TradingEngine {
       let tpPlaced = false;
 
       try {
-        await this.binance.newAlgoOrder({
+        await this.exchange.newAlgoOrder({
           symbol,
           side: (direction === 'LONG' ? 'SELL' : 'BUY') as 'BUY' | 'SELL',
           positionSide: direction as 'LONG' | 'SHORT',
@@ -725,7 +724,7 @@ export class TradingEngine {
       }
 
       try {
-        await this.binance.newAlgoOrder({
+        await this.exchange.newAlgoOrder({
           symbol,
           side: (direction === 'LONG' ? 'SELL' : 'BUY') as 'BUY' | 'SELL',
           positionSide: direction as 'LONG' | 'SHORT',
@@ -874,7 +873,7 @@ export class TradingEngine {
         const posAmt = Math.abs(parseFloat(pos.positionAmt));
 
         try {
-          await this.binance.newOrder({
+          await this.exchange.newOrder({
             symbol: order.symbol,
             side: closeSide as 'BUY' | 'SELL',
             positionSide: order.direction as 'LONG' | 'SHORT',

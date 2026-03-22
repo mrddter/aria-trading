@@ -7,18 +7,23 @@
  */
 
 import { Hono } from 'hono';
-import { BinanceFuturesClient } from './binance/client';
 import { TelegramBot, TelegramUpdate } from './telegram/bot';
 import { TradingEngine, EngineConfig, getSoftOrderKeys } from './trading/engine';
 import { runAudit, formatAuditTelegram, formatAuditAlert } from './trading/audit';
+import { createExchange } from './exchange/factory';
+import type { IExchange } from './exchange/types';
 import { generateReport, formatReportTelegram, formatReportCompact, TradeRecord } from './trading/performance';
 import { costTracker, loadCosts, flushCosts, formatCostsTelegram } from './wavespeed/client';
 import type { AiBinding } from './wavespeed/workers-ai';
 import { ExperienceDB } from './trading/experience';
 
 type Bindings = {
+  EXCHANGE?: string;
   BINANCE_API_KEY: string;
   BINANCE_API_SECRET: string;
+  HL_PRIVATE_KEY?: string;
+  HL_VAULT_ADDRESS?: string;
+  HL_TESTNET?: string;
   WAVESPEED_API_KEY: string;
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_CHAT_ID: string;
@@ -43,11 +48,7 @@ app.get('/health', (c) => {
 
 // Account info (for debugging)
 app.get('/account', async (c) => {
-  const binance = new BinanceFuturesClient({
-    BINANCE_API_KEY: c.env.BINANCE_API_KEY,
-    BINANCE_API_SECRET: c.env.BINANCE_API_SECRET,
-    ENVIRONMENT: c.env.ENVIRONMENT,
-  });
+  const binance = createExchange(c.env);
   try {
     const account = await binance.getAccountInfo();
     const positions = account.positions.filter(
@@ -98,11 +99,7 @@ app.post('/webhook/telegram/:secret', async (c) => {
   try {
     switch (command) {
       case '/status': {
-        const binance = new BinanceFuturesClient({
-          BINANCE_API_KEY: c.env.BINANCE_API_KEY,
-          BINANCE_API_SECRET: c.env.BINANCE_API_SECRET,
-          ENVIRONMENT: c.env.ENVIRONMENT,
-        });
+        const binance = createExchange(c.env);
         const account = await binance.getAccountInfo();
         const positions = account.positions.filter(
           (p: any) => parseFloat(p.positionAmt) !== 0
@@ -121,11 +118,7 @@ app.post('/webhook/telegram/:secret', async (c) => {
 
       case '/positions':
       case '/pos': {
-        const binance = new BinanceFuturesClient({
-          BINANCE_API_KEY: c.env.BINANCE_API_KEY,
-          BINANCE_API_SECRET: c.env.BINANCE_API_SECRET,
-          ENVIRONMENT: c.env.ENVIRONMENT,
-        });
+        const binance = createExchange(c.env);
         const positions = await binance.getPositionRisk();
 
         if (positions.length === 0) {
@@ -196,11 +189,7 @@ app.post('/webhook/telegram/:secret', async (c) => {
 
       case '/performance':
       case '/perf': {
-        const binance = new BinanceFuturesClient({
-          BINANCE_API_KEY: c.env.BINANCE_API_KEY,
-          BINANCE_API_SECRET: c.env.BINANCE_API_SECRET,
-          ENVIRONMENT: c.env.ENVIRONMENT,
-        });
+        const binance = createExchange(c.env);
         const account = await binance.getAccountInfo();
         const positions = account.positions.filter(
           (p: any) => parseFloat(p.positionAmt) !== 0
@@ -274,11 +263,7 @@ app.post('/webhook/telegram/:secret', async (c) => {
       }
 
       case '/costs': {
-        const binance = new BinanceFuturesClient({
-          BINANCE_API_KEY: c.env.BINANCE_API_KEY,
-          BINANCE_API_SECRET: c.env.BINANCE_API_SECRET,
-          ENVIRONMENT: c.env.ENVIRONMENT,
-        });
+        const binance = createExchange(c.env);
         const account = await binance.getAccountInfo();
         const realizedPnl = parseFloat(account.totalWalletBalance) - 5000;
         const unrealizedPnl = parseFloat(account.totalUnrealizedProfit);
@@ -296,11 +281,7 @@ app.post('/webhook/telegram/:secret', async (c) => {
       }
 
       case '/audit': {
-        const binance = new BinanceFuturesClient({
-          BINANCE_API_KEY: c.env.BINANCE_API_KEY,
-          BINANCE_API_SECRET: c.env.BINANCE_API_SECRET,
-          ENVIRONMENT: c.env.ENVIRONMENT,
-        });
+        const binance = createExchange(c.env);
         await binance.loadExchangeInfo();
         if (!c.env.DB) {
           await telegram.sendMessage('⚠️ D1 not configured.');
@@ -314,11 +295,7 @@ app.post('/webhook/telegram/:secret', async (c) => {
 
       case '/closeold': {
         // One-time command: close old positions without SL/TP and clean D1
-        const binance = new BinanceFuturesClient({
-          BINANCE_API_KEY: c.env.BINANCE_API_KEY,
-          BINANCE_API_SECRET: c.env.BINANCE_API_SECRET,
-          ENVIRONMENT: c.env.ENVIRONMENT,
-        });
+        const binance = createExchange(c.env);
 
         const toClose = [
           { symbol: 'PENDLEUSDT', side: 'BUY' as const, positionSide: 'SHORT' as const, qty: 411 },
@@ -431,11 +408,7 @@ let lastRebalance = 0;
 
 function getEngine(env: Bindings): TradingEngine {
   if (!engine) {
-    const binance = new BinanceFuturesClient({
-      BINANCE_API_KEY: env.BINANCE_API_KEY,
-      BINANCE_API_SECRET: env.BINANCE_API_SECRET,
-      ENVIRONMENT: env.ENVIRONMENT,
-    });
+    const binance = createExchange(env);
 
     const telegram = new TelegramBot(
       env.TELEGRAM_BOT_TOKEN,
@@ -477,11 +450,7 @@ export default {
 
     // Setup: load exchange info + enable hedge mode on first run
     try {
-      const binance = new BinanceFuturesClient({
-        BINANCE_API_KEY: env.BINANCE_API_KEY,
-        BINANCE_API_SECRET: env.BINANCE_API_SECRET,
-        ENVIRONMENT: env.ENVIRONMENT,
-      });
+      const binance = createExchange(env);
       await binance.loadExchangeInfo();
       await binance.setPositionMode(true);
     } catch {
@@ -517,11 +486,7 @@ export default {
       // 5. Auto audit — alert only on critical/warning issues
       if (env.DB) {
         try {
-          const auditBinance = new BinanceFuturesClient({
-            BINANCE_API_KEY: env.BINANCE_API_KEY,
-            BINANCE_API_SECRET: env.BINANCE_API_SECRET,
-            ENVIRONMENT: env.ENVIRONMENT,
-          });
+          const auditBinance = createExchange(env);
           const auditExp = new ExperienceDB(env.DB);
           const auditReport = await runAudit(auditBinance, auditExp, getSoftOrderKeys(), 5000);
           const alert = formatAuditAlert(auditReport.issues);

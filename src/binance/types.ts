@@ -1,38 +1,10 @@
-/** Binance Futures API types */
+/**
+ * Binance-specific types.
+ * Re-exports common exchange types for backwards compatibility.
+ */
 
-export type OrderSide = 'BUY' | 'SELL';
-export type PositionSide = 'LONG' | 'SHORT' | 'BOTH';
-export type OrderType = 'LIMIT' | 'MARKET' | 'STOP_MARKET' | 'TAKE_PROFIT_MARKET';
-export type TimeInForce = 'GTC' | 'IOC' | 'FOK';
-
-export interface NewOrderParams {
-  symbol: string;
-  side: OrderSide;
-  positionSide: PositionSide;
-  type: OrderType;
-  quantity: number;
-  price?: number;
-  stopPrice?: number;
-  timeInForce?: TimeInForce;
-  reduceOnly?: boolean;
-}
-
-export interface AccountInfo {
-  totalWalletBalance: string;
-  totalUnrealizedProfit: string;
-  totalMarginBalance: string;
-  availableBalance: string;
-  positions: Position[];
-}
-
-export interface Position {
-  symbol: string;
-  positionSide: PositionSide;
-  positionAmt: string;
-  entryPrice: string;
-  unrealizedProfit: string;
-  leverage: string;
-}
+// Re-export common types from exchange abstraction
+export type { OrderSide, PositionSide, OrderType, TimeInForce, NewOrderParams, AccountInfo, Position } from '../exchange/types';
 
 /** Kline (candlestick) data from Binance */
 export interface Kline {

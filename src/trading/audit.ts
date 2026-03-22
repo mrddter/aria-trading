@@ -11,8 +11,7 @@
  * Full report available via /audit command.
  */
 
-import type { AccountInfo } from '../binance/types';
-import { BinanceFuturesClient } from '../binance/client';
+import type { IExchange, AccountInfo } from '../exchange/types';
 import { ExperienceDB } from './experience';
 
 export interface AuditIssue {
@@ -33,7 +32,7 @@ export interface AuditReport {
  * Run a full audit check. Returns issues found.
  */
 export async function runAudit(
-  binance: BinanceFuturesClient,
+  exchange: IExchange,
   experience: ExperienceDB,
   softOrderKeys: string[],
   startingBalance: number
@@ -44,8 +43,8 @@ export async function runAudit(
   let account: AccountInfo;
   let binancePositions: Array<{ symbol: string; direction: string; amt: number; pnl: number; markPrice: number }> = [];
   try {
-    account = await binance.getAccountInfo();
-    const posRisk = await binance.getPositionRisk();
+    account = await exchange.getAccountInfo();
+    const posRisk = await exchange.getPositionRisk();
     binancePositions = posRisk.map(p => {
       const amt = parseFloat(p.positionAmt);
       return {

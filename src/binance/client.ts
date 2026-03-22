@@ -4,7 +4,7 @@
  */
 
 import { createHmacSignature } from './auth';
-import type { OrderSide, PositionSide, AccountInfo, NewOrderParams } from './types';
+import type { IExchange, SymbolPrecision, Ticker24hr, PositionRiskEntry, AccountInfo, NewOrderParams, AlgoOrderParams } from '../exchange/types';
 
 export interface BinanceEnv {
   BINANCE_API_KEY: string;
@@ -12,17 +12,8 @@ export interface BinanceEnv {
   ENVIRONMENT: string;
 }
 
-interface SymbolPrecision {
-  quantityPrecision: number;
-  pricePrecision: number;
-  stepSize: number;
-  tickSize: number;
-  minQty: number;
-  maxQty: number;
-  minNotional: number;
-}
-
-export class BinanceFuturesClient {
+export class BinanceFuturesClient implements IExchange {
+  readonly name = 'Binance';
   private apiKey: string;
   private apiSecret: string;
   private baseUrl: string;
@@ -127,6 +118,10 @@ export class BinanceFuturesClient {
     return this.publicGet('/fapi/v1/klines', { symbol, interval, limit: String(limit) }) as Promise<number[][]>;
   }
 
+  async getTicker24hr(symbol: string): Promise<Ticker24hr> {
+    return this.publicGet('/fapi/v1/ticker/24hr', { symbol }) as Promise<Ticker24hr>;
+  }
+
   async getLongShortRatio(symbol: string, period: string = '1h') {
     return this.publicGet('/futures/data/globalLongShortAccountRatio', {
       symbol, period, limit: '10',
@@ -140,11 +135,7 @@ export class BinanceFuturesClient {
   }
 
   /** Get positions with entry price, leverage, and mark price */
-  async getPositionRisk(): Promise<Array<{
-    symbol: string; positionSide: string; positionAmt: string;
-    entryPrice: string; leverage: string; markPrice: string;
-    unRealizedProfit: string; liquidationPrice: string;
-  }>> {
+  async getPositionRisk(): Promise<PositionRiskEntry[]> {
     const all = await this.signedGet('/fapi/v3/positionRisk') as any[];
     const open = all.filter((p: any) => parseFloat(p.positionAmt) !== 0);
     // v3 API may use different field names - normalize
@@ -174,15 +165,7 @@ export class BinanceFuturesClient {
     return this.signedPost('/fapi/v1/order', orderParams);
   }
 
-  async newAlgoOrder(params: {
-    symbol: string;
-    side: OrderSide;
-    positionSide: PositionSide;
-    type: 'STOP_MARKET' | 'TAKE_PROFIT_MARKET';
-    triggerPrice: number;
-    quantity?: number;
-    closePosition?: boolean;
-  }) {
+  async newAlgoOrder(params: AlgoOrderParams) {
     const orderParams: Record<string, string> = {
       algoType: 'CONDITIONAL',
       symbol: params.symbol,
