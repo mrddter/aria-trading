@@ -3,6 +3,7 @@
  */
 
 import { BinanceFuturesClient } from '../binance/client';
+import { HyperliquidClient } from '../hyperliquid/client';
 import type { IExchange } from './types';
 
 export interface ExchangeEnv {
@@ -10,7 +11,7 @@ export interface ExchangeEnv {
   // Binance
   BINANCE_API_KEY?: string;
   BINANCE_API_SECRET?: string;
-  // Hyperliquid (future)
+  // Hyperliquid
   HL_PRIVATE_KEY?: string;
   HL_VAULT_ADDRESS?: string;
   HL_TESTNET?: string;
@@ -33,7 +34,14 @@ export function createExchange(env: ExchangeEnv): IExchange {
       });
 
     case 'hyperliquid':
-      throw new Error('Hyperliquid not yet implemented — coming soon');
+      if (!env.HL_PRIVATE_KEY) {
+        throw new Error('HL_PRIVATE_KEY required for Hyperliquid');
+      }
+      return new HyperliquidClient({
+        privateKey: env.HL_PRIVATE_KEY,
+        vaultAddress: env.HL_VAULT_ADDRESS,
+        isTestnet: env.HL_TESTNET === 'true' || env.ENVIRONMENT === 'testnet',
+      });
 
     default:
       throw new Error(`Unknown exchange: ${exchange}`);
