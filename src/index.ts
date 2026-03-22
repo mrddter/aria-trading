@@ -37,6 +37,10 @@ type Bindings = {
 
 const app = new Hono<{ Bindings: Bindings }>();
 
+function getStartingBalance(env: { EXCHANGE?: string }): number {
+  return (env.EXCHANGE || 'binance').toLowerCase() === 'hyperliquid' ? 60 : 5000;
+}
+
 // Health check
 app.get('/health', (c) => {
   return c.json({
@@ -253,7 +257,7 @@ app.post('/webhook/telegram/:secret', async (c) => {
           for (const t of symTrades) t.fee = perTrade;
         }
 
-        const startingBalance = 5000;
+        const startingBalance = getStartingBalance(c.env);
         const currentBalance = parseFloat(account.totalWalletBalance);
         const unrealizedPnl = parseFloat(account.totalUnrealizedProfit);
 
@@ -265,7 +269,7 @@ app.post('/webhook/telegram/:secret', async (c) => {
       case '/costs': {
         const binance = createExchange(c.env);
         const account = await binance.getAccountInfo();
-        const realizedPnl = parseFloat(account.totalWalletBalance) - 5000;
+        const realizedPnl = parseFloat(account.totalWalletBalance) - getStartingBalance(c.env);
         const unrealizedPnl = parseFloat(account.totalUnrealizedProfit);
         const totalPnl = realizedPnl + unrealizedPnl;
 
@@ -288,7 +292,7 @@ app.post('/webhook/telegram/:secret', async (c) => {
           break;
         }
         const expDb = new ExperienceDB(c.env.DB);
-        const report = await runAudit(binance, expDb, getSoftOrderKeys(), 5000);
+        const report = await runAudit(binance, expDb, getSoftOrderKeys(), getStartingBalance(c.env));
         await telegram.sendMessage(formatAuditTelegram(report));
         break;
       }
@@ -408,29 +412,30 @@ let lastRebalance = 0;
 
 function getEngine(env: Bindings): TradingEngine {
   if (!engine) {
-    const binance = createExchange(env);
+    const exchange = createExchange(env);
 
     const telegram = new TelegramBot(
       env.TELEGRAM_BOT_TOKEN,
       env.TELEGRAM_CHAT_ID
     );
 
+    const isHyperliquid = (env.EXCHANGE || 'binance').toLowerCase() === 'hyperliquid';
     const config: EngineConfig = {
       symbols: [
         'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
         'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT',
       ],
-      leverage: 10,          // Base leverage - regime adjusts dynamically (3x-15x)
-      riskPerTrade: 2,       // Base risk % - regime adjusts dynamically
-      maxPositionSizeUsdt: 500,
-      maxPositions: 6,
+      leverage: isHyperliquid ? 3 : 10,
+      riskPerTrade: isHyperliquid ? 2 : 2,
+      maxPositionSizeUsdt: isHyperliquid ? 10 : 500,
+      maxPositions: isHyperliquid ? 3 : 6,
       enableEventDriven: true,
-      enableMarketNeutral: true,
+      enableMarketNeutral: !isHyperliquid, // Disable for now (no hedge mode)
       analystModel: 'anthropic/claude-haiku-4.5',
       highImpactModel: 'anthropic/claude-sonnet-4.5',
     };
 
-    engine = new TradingEngine(binance, telegram, env.WAVESPEED_API_KEY, config, env.AI, env.DB, env.NVIDIA_API_KEY);
+    engine = new TradingEngine(exchange, telegram, env.WAVESPEED_API_KEY, config, env.AI, env.DB, env.NVIDIA_API_KEY);
   }
   return engine;
 }
@@ -488,7 +493,7 @@ export default {
         try {
           const auditBinance = createExchange(env);
           const auditExp = new ExperienceDB(env.DB);
-          const auditReport = await runAudit(auditBinance, auditExp, getSoftOrderKeys(), 5000);
+          const auditReport = await runAudit(auditBinance, auditExp, getSoftOrderKeys(), getStartingBalance(env));
           const alert = formatAuditAlert(auditReport.issues);
           if (alert) {
             const auditTelegram = new TelegramBot(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID);

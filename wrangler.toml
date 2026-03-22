@@ -9,6 +9,7 @@ crons = ["*/5 * * * *"]
 [vars]
 ENVIRONMENT = "testnet"
 BOT_ACTIVE = "true"
+EXCHANGE = "hyperliquid"
 
 # KV namespace for persistent cost tracking
 [[kv_namespaces]]
