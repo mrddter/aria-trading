@@ -132,21 +132,51 @@ app.post('/webhook/telegram/:secret', async (c) => {
           break;
         }
 
+        // Load open trades from D1 for SL/TP/leverage data
+        const experience = c.env.DB ? new ExperienceDB(c.env.DB) : null;
+        const openTrades = experience ? await experience.getOpenTrades() : [];
+        const tradeMap = new Map(openTrades.map(t => [`${t.symbol}:${t.direction}`, t]));
+
         let totalPnl = 0;
         let msg = `📊 <b>Open Positions (${positions.length})</b>\n\n`;
         for (const p of positions) {
           const amt = parseFloat(p.positionAmt);
+          const direction = amt > 0 ? 'LONG' : 'SHORT';
           const side = amt > 0 ? '🟢 LONG' : '🔴 SHORT';
           const pnl = parseFloat((p as any).unRealizedProfit || (p as any).unrealizedProfit || '0');
           const entry = parseFloat(p.entryPrice);
           const mark = parseFloat(p.markPrice);
-          const lev = p.leverage || '?';
+          const decimals = entry >= 100 ? 2 : entry >= 1 ? 4 : 6;
+
+          // Get SL/TP/leverage from D1
+          const trade = tradeMap.get(`${p.symbol}:${direction}`);
+          const lev = p.leverage || trade?.leverage || '?';
+          const sl = trade?.stop_loss;
+          const tp = trade?.take_profit;
+
           const pnlPct = entry > 0 ? ((mark - entry) / entry * 100 * (amt > 0 ? 1 : -1)) : 0;
           const pnlEmoji = pnl >= 0 ? '📈' : '📉';
           totalPnl += pnl;
+
           msg += `${side} <b>${p.symbol}</b> (${lev}x)\n`;
-          msg += `  Entry: <code>$${entry.toFixed(entry >= 100 ? 2 : entry >= 1 ? 4 : 6)}</code> → <code>$${mark.toFixed(mark >= 100 ? 2 : mark >= 1 ? 4 : 6)}</code>\n`;
+          msg += `  Entry: <code>$${entry.toFixed(decimals)}</code> → <code>$${mark.toFixed(decimals)}</code>\n`;
           msg += `  Size: <code>${Math.abs(amt)}</code>\n`;
+
+          // Show SL/TP with distance
+          if (sl || tp) {
+            let slTpLine = '  ';
+            if (sl) {
+              const slDist = ((mark - sl) / mark * 100 * (amt > 0 ? 1 : -1));
+              slTpLine += `SL: <code>$${sl.toFixed(decimals)}</code> (${slDist.toFixed(1)}%)`;
+            }
+            if (sl && tp) slTpLine += ' | ';
+            if (tp) {
+              const tpDist = ((tp - mark) / mark * 100 * (amt > 0 ? 1 : -1));
+              slTpLine += `TP: <code>$${tp.toFixed(decimals)}</code> (${tpDist.toFixed(1)}%)`;
+            }
+            msg += slTpLine + '\n';
+          }
+
           msg += `  ${pnlEmoji} P&L: <code>${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)</code>\n\n`;
         }
         msg += `<b>Totale P&L: <code>${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)}</code></b>`;

@@ -539,4 +539,35 @@ export class ExperienceDB {
 
     return msg;
   }
+
+  /** Get open trades with SL/TP for position display and soft order recovery */
+  async getOpenTrades(): Promise<Array<{
+    symbol: string;
+    direction: string;
+    price: number;
+    quantity: number;
+    stop_loss: number | null;
+    take_profit: number | null;
+    leverage: number;
+    strategy: string;
+    opened_at: string;
+  }>> {
+    const result = await this.db
+      .prepare(
+        `SELECT symbol, direction, price, quantity, stop_loss, take_profit, leverage, strategy, opened_at
+        FROM trades WHERE status = 'OPEN' ORDER BY opened_at DESC`
+      )
+      .all<{
+        symbol: string;
+        direction: string;
+        price: number;
+        quantity: number;
+        stop_loss: number | null;
+        take_profit: number | null;
+        leverage: number;
+        strategy: string;
+        opened_at: string;
+      }>();
+    return result.results || [];
+  }
 }

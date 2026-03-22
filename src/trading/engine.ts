@@ -747,8 +747,32 @@ export class TradingEngine {
    * Software SL/TP checker - runs every cron cycle.
    * Closes positions that have hit SL or TP levels via MARKET order.
    * This is a safety net for when Binance algo orders fail.
+   * Recovers soft orders from D1 if in-memory map is empty (after deploy/restart).
    */
   async checkSoftOrders(): Promise<void> {
+    // Recover soft orders from D1 if in-memory map is empty (lost after deploy/restart)
+    if (softOrders.size === 0 && this.experience) {
+      const openTrades = await this.experience.getOpenTrades();
+      for (const t of openTrades) {
+        if (t.stop_loss && t.take_profit) {
+          const key = `${t.symbol}:${t.direction}`;
+          softOrders.set(key, {
+            symbol: t.symbol,
+            direction: t.direction as 'LONG' | 'SHORT',
+            stopLoss: t.stop_loss,
+            takeProfit: t.take_profit,
+            quantity: t.quantity,
+            entryPrice: t.price,
+            strategy: t.strategy,
+            openedAt: new Date(t.opened_at).getTime(),
+          });
+        }
+      }
+      if (openTrades.length > 0) {
+        console.log(`[SoftSL/TP] Recovered ${softOrders.size} orders from D1`);
+      }
+    }
+
     if (softOrders.size === 0) return;
 
     console.log(`[SoftSL/TP] Checking ${softOrders.size} orders...`);
