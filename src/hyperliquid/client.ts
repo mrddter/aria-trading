@@ -272,11 +272,14 @@ export class HyperliquidClient implements IExchange {
 
     const positions = state.assetPositions.map(p => {
       const szi = parseFloat(p.position.szi);
+      const posValue = parseFloat(p.position.positionValue || '0');
+      const markPrice = szi !== 0 ? Math.abs(posValue / szi) : 0;
       return {
         symbol: this.fromHlSymbol(p.position.coin),
         positionSide: (szi >= 0 ? 'LONG' : 'SHORT') as 'LONG' | 'SHORT',
         positionAmt: p.position.szi,
         entryPrice: p.position.entryPx,
+        markPrice: markPrice.toString(),
         unrealizedProfit: p.position.unrealizedPnl,
         leverage: p.position.leverage.value.toString(),
       };
