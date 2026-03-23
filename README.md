@@ -8,20 +8,22 @@
 
 Autonomous crypto trading bot powered by multi-LLM intelligence, running on Cloudflare Workers with zero hosting costs.
 
-ARIA monitors crypto news in real-time, classifies events through a pipeline of AI models, validates signals with quantitative filters, and executes trades on Binance Futures -- all from a serverless function that costs $0 to run.
+ARIA monitors crypto news in real-time, classifies events through a pipeline of AI models, validates signals with quantitative filters, and executes trades on Hyperliquid -- all from a serverless function that costs $0 to run.
 
 ---
 
 ## Features
 
-- **Multi-LLM Pipeline** -- Llama 4 Scout for batch classification, Qwen 3.5 for deep analysis and strategic reasoning
+- **Multi-LLM Pipeline** -- Llama 4 Scout for batch classification, Kimi K2 for strategic trade reasoning, Claude for deep analysis
+- **Multi-Exchange Support** -- Hyperliquid (primary) and Binance Futures, with a pluggable exchange interface
 - **Event-Driven Trading** -- Detects breaking news, analyzes sentiment, and trades within seconds
 - **Market-Neutral Strategy** -- Maintains balanced long/short exposure to reduce directional risk
 - **Dynamic Market Regime Detection** -- Adapts leverage, position sizing, and bias across 5 market regimes
 - **Experience Database** -- Self-learning system that records trades, tracks patterns, and feeds historical context back to the LLM
+- **Automated Audit System** -- Detects ghost trades, orphaned positions, missing SL/TP, and balance anomalies
 - **Telegram Control Interface** -- Real-time notifications and interactive commands from your phone
-- **Zero Hosting Cost** -- Runs entirely on Cloudflare Workers free tier, with free LLM inference via Workers AI and NVIDIA NIM
-- **Risk Management** -- Dynamic leverage (3x-15x), ATR-based stop-loss/take-profit, position sizing, and software SL/TP safety net
+- **Zero Hosting Cost** -- Runs entirely on Cloudflare Workers free tier, with free LLM inference via Workers AI
+- **Risk Management** -- Dynamic leverage (2x-15x), ATR-based stop-loss/take-profit, position sizing, and software SL/TP safety net
 
 ## Architecture
 
@@ -30,8 +32,8 @@ ARIA monitors crypto news in real-time, classifies events through a pipeline of 
   ┌─────────────────────────────────────────────────────────────────────┐
   │                                                                     │
   │   ┌──────────────┐     ┌───────────────┐     ┌──────────────────┐  │
-  │   │  News Sources │     │  Fear & Greed  │     │  Binance Market  │  │
-  │   │  (CryptoPanic,│     │    Index       │     │    Data (OHLCV)  │  │
+  │   │  News Sources │     │  Fear & Greed  │     │  Exchange Market │  │
+  │   │  (CryptoPanic,│     │    Index       │     │   Data (OHLCV)  │  │
   │   │   RSS feeds)  │     └───────┬───────┘     └────────┬─────────┘  │
   │   └──────┬───────┘             │                       │            │
   │          │                     │                       │            │
@@ -45,9 +47,9 @@ ARIA monitors crypto news in real-time, classifies events through a pipeline of 
   │          │              │                              │            │
   │          ▼              ▼                              │            │
   │   ┌────────────┐ ┌─────────────┐                      │            │
-  │   │  Qwen 3.5  │ │ Llama 4     │                      │            │
-  │   │  122B      │ │ Scout 17B   │     LLM Sensor       │            │
-  │   │ (NVIDIA)   │ │ (Workers AI)│     Layer             │            │
+  │   │  Claude    │ │ Llama 4     │                      │            │
+  │   │  Sonnet 4.5│ │ Scout 17B   │     LLM Sensor       │            │
+  │   │ (WaveSpeed)│ │ (Workers AI)│     Layer             │            │
   │   └─────┬──────┘ └──────┬──────┘                      │            │
   │         │               │                              │            │
   │         ▼               ▼                              │            │
@@ -61,26 +63,28 @@ ARIA monitors crypto news in real-time, classifies events through a pipeline of 
   │   │      Quantitative Filter         │◄────────────────┘            │
   │   │  RSI, ADX, ATR, Volume, EMA      │                             │
   │   │  + Market Regime Detection       │                             │
+  │   │  + Min $5M 24h Volume Filter     │                             │
   │   └──────────────┬───────────────────┘                             │
   │                  │                                                  │
   │                  ▼                                                  │
   │   ┌──────────────────────────────────┐    ┌───────────────────┐    │
-  │   │     Qwen 3.5 Strategist          │◄───│  Experience DB    │    │
-  │   │  (chain-of-thought reasoning)    │    │  (D1 - patterns,  │    │
-  │   │  approve/reject + adjust SL/TP   │    │   trade history)  │    │
+  │   │     Kimi K2 Strategist           │◄───│  Experience DB    │    │
+  │   │  (approve/reject + adjust SL/TP) │    │  (D1 - patterns,  │    │
+  │   │  FREE on Workers AI              │    │   trade history)  │    │
   │   └──────────────┬───────────────────┘    └───────────────────┘    │
   │                  │                                                  │
   │                  ▼                                                  │
   │   ┌──────────────────────────────────┐    ┌───────────────────┐    │
-  │   │    Risk Manager & Executor       │───►│  Binance Futures  │    │
-  │   │  (position sizing, leverage,     │    │  (testnet/mainnet)│    │
+  │   │    Risk Manager & Executor       │───►│  Hyperliquid      │    │
+  │   │  (position sizing, leverage,     │    │  (perps, mainnet) │    │
   │   │   SL/TP orders, max positions)   │    └───────────────────┘    │
   │   └──────────────┬───────────────────┘                             │
   │                  │                                                  │
   │                  ▼                                                  │
   │   ┌──────────────────────────────────┐                             │
-  │   │         Telegram Bot             │                             │
-  │   │  (notifications + commands)      │                             │
+  │   │     Telegram Bot + Audit         │                             │
+  │   │  (notifications, commands,       │                             │
+  │   │   automated health checks)       │                             │
   │   └──────────────────────────────────┘                             │
   │                                                                     │
   │   ─── Cloudflare Workers (Cron: every 5 min) ───────────────────   │
@@ -94,12 +98,21 @@ ARIA uses a tiered LLM architecture where each model has a specific role, optimi
 | Role | Model | Provider | Cost | When |
 |---|---|---|---|---|
 | Batch Classifier | Llama 4 Scout 17B | Cloudflare Workers AI | $0 (free tier) | Every 5 min -- classifies all normal news items |
-| High-Impact Analyst | Qwen 3.5 122B | NVIDIA NIM | $0 (free tier) | On breaking news -- deep sentiment analysis |
-| Strategist | Qwen 3.5 122B | NVIDIA NIM | $0 (free tier) | On strong signals -- chain-of-thought trade approval |
+| High-Impact Analyst | Claude Sonnet 4.5 | WaveSpeed | ~$0.002/call | On breaking news -- deep sentiment analysis |
+| Strategist | Kimi K2 | Cloudflare Workers AI | $0 (free tier) | On strong signals -- trade approval/rejection |
 | Fallback | Claude Haiku 4.5 | WaveSpeed | ~$0.001/call | Only if primary providers are down |
 | Executor | TypeScript Engine | Cloudflare Workers | $0 | Always -- risk management, order execution |
 
-The LLM layer acts purely as a **sensor** -- it classifies and extracts structured data from news. It never decides to buy or sell. All trading decisions go through the quantitative filter and risk management engine.
+The LLM layer acts purely as a **sensor** -- it classifies and extracts structured data from news. It never decides to buy or sell. All trading decisions go through the quantitative filter, strategist validation, and risk management engine.
+
+## Supported Exchanges
+
+| Exchange | Status | Features | Fees |
+|---|---|---|---|
+| **Hyperliquid** | Primary | Perps, cross-margin, algo SL/TP | 0.015% maker / 0.045% taker |
+| **Binance Futures** | Supported | Perps, hedge mode, algo SL/TP | 0.02% maker / 0.05% taker |
+
+The exchange layer is abstracted behind an `IExchange` interface, making it straightforward to add new exchanges.
 
 ## Market Regimes
 
@@ -120,10 +133,11 @@ Each regime also adjusts stop-loss/take-profit multipliers, minimum confidence t
 | Command | Description |
 |---|---|
 | `/status` | Account balance, environment, and bot active status |
-| `/pos` | All open positions with entry price, mark price, P&L |
+| `/pos` | All open positions with entry/mark price, P&L, SL/TP progress |
 | `/perf` | Full performance report: win rate, Sharpe, drawdown, profit factor |
 | `/costs` | LLM cost breakdown, trading P&L, and net monthly projection |
 | `/exp` | Experience database stats: trades, patterns learned, news accuracy |
+| `/audit` | Run manual health check: ghost trades, missing SL/TP, balance anomalies |
 | `/help` | List all available commands |
 
 ## Quick Start
@@ -132,9 +146,8 @@ Each regime also adjusts stop-loss/take-profit multipliers, minimum confidence t
 
 - [Node.js](https://nodejs.org/) 18+ and npm
 - [Cloudflare account](https://dash.cloudflare.com/sign-up) (free tier is sufficient)
-- [Binance Futures testnet account](https://testnet.binancefuture.com/)
+- [Hyperliquid account](https://app.hyperliquid.xyz/) with USDC deposited
 - Telegram bot token (create one via [@BotFather](https://t.me/BotFather))
-- [NVIDIA NIM API key](https://build.nvidia.com/) (free tier available)
 
 ### 1. Clone and Install
 
@@ -165,35 +178,46 @@ Update `wrangler.toml` with the KV namespace ID and D1 database ID from the outp
 ### 3. Configure Secrets
 
 ```bash
-# Binance Futures testnet API keys
-npx wrangler secret put BINANCE_API_KEY
-npx wrangler secret put BINANCE_API_SECRET
-
-# NVIDIA NIM API key (for Qwen 3.5)
-npx wrangler secret put NVIDIA_API_KEY
+# Hyperliquid wallet private key (for signing orders)
+npx wrangler secret put HL_PRIVATE_KEY
 
 # Telegram bot
 npx wrangler secret put TELEGRAM_BOT_TOKEN
 npx wrangler secret put TELEGRAM_CHAT_ID
 
-# WaveSpeed API key (fallback LLM provider)
+# WaveSpeed API key (for Claude high-impact analysis)
 npx wrangler secret put WAVESPEED_API_KEY
+
+# Optional: Binance Futures (if using Binance instead of Hyperliquid)
+# npx wrangler secret put BINANCE_API_KEY
+# npx wrangler secret put BINANCE_API_SECRET
 ```
 
-### 4. Deploy
+### 4. Configure Exchange
+
+In `wrangler.toml`, set the exchange and wallet address:
+
+```toml
+[vars]
+EXCHANGE = "hyperliquid"         # "hyperliquid" or "binance"
+HL_WALLET_ADDRESS = "0x..."      # Your Ethereum wallet address
+BOT_ACTIVE = "true"              # Kill switch
+```
+
+### 5. Deploy
 
 ```bash
 npx wrangler deploy
 ```
 
-### 5. Set Up Telegram Webhook
+### 6. Set Up Telegram Webhook
 
 ```bash
 # Register the webhook with Telegram
 curl -X POST https://your-worker.workers.dev/webhook/telegram/register
 ```
 
-### 6. Verify
+### 7. Verify
 
 ```bash
 # Check health
@@ -202,40 +226,44 @@ curl https://your-worker.workers.dev/health
 # Send /status in your Telegram bot
 ```
 
-The bot starts in **testnet mode** by default (`ENVIRONMENT = "testnet"` in `wrangler.toml`). All trades will execute against the Binance Futures testnet with no real funds at risk.
-
 ## Configuration
 
 All runtime configuration is in `wrangler.toml`:
 
 ```toml
 [vars]
-ENVIRONMENT = "testnet"    # "testnet" or "mainnet"
-BOT_ACTIVE = "true"        # Kill switch - set to "false" to pause all trading
+EXCHANGE = "hyperliquid"       # "hyperliquid" or "binance"
+HL_WALLET_ADDRESS = "0x..."    # Hyperliquid wallet address
+BOT_ACTIVE = "true"            # Kill switch - set to "false" to pause all trading
 ```
 
 Trading parameters are defined in `src/index.ts` within the `EngineConfig`:
 
-| Parameter | Default | Description |
-|---|---|---|
-| `symbols` | 10 major pairs | Watchlist: BTC, ETH, BNB, SOL, XRP, DOGE, ADA, AVAX, DOT, LINK |
-| `leverage` | 10x | Base leverage (regime adjusts between 3x-15x) |
-| `riskPerTrade` | 2% | Base risk per trade as % of balance |
-| `maxPositionSizeUsdt` | $500 | Maximum notional value per position |
-| `maxPositions` | 6 | Maximum simultaneous open positions |
-| `enableEventDriven` | true | Enable event-driven trading on breaking news |
-| `enableMarketNeutral` | true | Enable market-neutral rebalancing |
+| Parameter | Hyperliquid | Binance | Description |
+|---|---|---|---|
+| `symbols` | 14 pairs | 10 pairs | Watchlist for market-neutral strategy |
+| `leverage` | 3x | 10x | Base leverage (regime adjusts dynamically) |
+| `riskPerTrade` | 2% | 2% | Base risk per trade as % of balance |
+| `maxPositionSizeUsdt` | $15 | $500 | Maximum notional value per position |
+| `maxPositions` | 3 | 6 | Maximum simultaneous open positions |
+| `enableEventDriven` | true | true | Enable event-driven trading on breaking news |
+| `enableMarketNeutral` | false | true | Enable market-neutral rebalancing |
 
 ## Project Structure
 
 ```
-aria/
+aria-trading/
 ├── src/
 │   ├── index.ts                          # Entry point, routes, cron handler
+│   ├── exchange/
+│   │   └── types.ts                      # IExchange interface + shared types
 │   ├── binance/
 │   │   ├── client.ts                     # Binance Futures API client
 │   │   ├── auth.ts                       # HMAC signature generation
 │   │   └── types.ts                      # Binance API type definitions
+│   ├── hyperliquid/
+│   │   ├── client.ts                     # Hyperliquid API client (IExchange)
+│   │   └── auth.ts                       # EIP-712 signing for L1 actions
 │   ├── ingestion/
 │   │   ├── collector.ts                  # News event collector + impact classifier
 │   │   └── sources.ts                    # News source definitions (CryptoPanic, RSS)
@@ -247,6 +275,7 @@ aria/
 │   │   ├── engine.ts                     # Main trading engine (pipeline orchestrator)
 │   │   ├── regime.ts                     # Market regime detector (5 regimes)
 │   │   ├── experience.ts                # Experience database (D1-backed learning)
+│   │   ├── audit.ts                      # Automated health check system
 │   │   ├── performance.ts               # Performance metrics (Sharpe, drawdown, etc.)
 │   │   ├── risk.ts                       # Position sizing calculator
 │   │   ├── signals.ts                    # Signal type definitions
@@ -259,9 +288,8 @@ aria/
 │   │   └── indicators.ts                # Technical indicators (RSI, EMA, MACD, BB, ADX, ATR)
 │   └── wavespeed/
 │       ├── client.ts                     # WaveSpeed LLM gateway + cost tracker
-│       ├── nvidia.ts                     # NVIDIA NIM client (Qwen 3.5 strategist)
-│       └── workers-ai.ts                # Cloudflare Workers AI client (Llama 4 Scout)
-├── backtest/                             # Backtesting framework
+│       ├── nvidia.ts                     # NVIDIA NIM client (legacy, unused)
+│       └── workers-ai.ts                # Workers AI client (Llama 4 Scout + Kimi K2)
 ├── tests/                                # Test suite (Vitest)
 ├── schema.sql                            # D1 database schema
 ├── wrangler.toml                         # Cloudflare Workers configuration
@@ -272,20 +300,22 @@ aria/
 
 ## Security
 
-- **Encrypted secrets** -- All API keys are stored as Cloudflare Worker secrets, encrypted at rest. Never committed to source control.
+- **Encrypted secrets** -- All API keys and private keys are stored as Cloudflare Worker secrets, encrypted at rest. Never committed to source control.
 - **Telegram chat lock** -- Commands are restricted to a single authorized chat ID. Messages from other chats are silently ignored.
-- **Hardcoded API URLs** -- Binance base URLs are hardcoded constants in the client, preventing redirect attacks via environment variable manipulation.
+- **Hardcoded API URLs** -- Exchange base URLs are hardcoded constants in the clients, preventing redirect attacks via environment variable manipulation.
+- **EIP-712 signing** -- Hyperliquid orders are signed locally with the private key using standard Ethereum typed data signatures. The key never leaves the Worker.
 - **Error sanitization** -- API keys are redacted from all error messages before logging or sending to Telegram.
 - **Rate limiting** -- Cron-based execution naturally rate-limits all operations. Max 3 high-impact events and 15 normal items processed per cycle.
+- **Automated audit** -- Periodic health checks detect ghost trades, orphaned positions, and balance anomalies.
 - **Kill switch** -- Set `BOT_ACTIVE=false` in the Cloudflare dashboard to immediately halt all trading activity.
 
 ## Roadmap
 
 - [ ] Web dashboard (Cloudflare Pages)
 - [ ] Expanded backtesting framework
+- [ ] News deduplication in D1 to prevent trading on repeated events
 - [ ] Additional strategies (mean reversion, momentum)
-- [ ] Multi-exchange support (Bybit, OKX)
-- [ ] Community strategy marketplace
+- [ ] Additional exchange support (Bybit, OKX)
 - [ ] On-chain data integration
 
 ## Disclaimer
@@ -295,7 +325,6 @@ This software is provided for **educational and research purposes only**. It is 
 - Cryptocurrency trading involves substantial risk of loss and is not suitable for every investor.
 - Past performance, whether simulated or live, does not guarantee future results.
 - The authors are not responsible for any financial losses incurred through the use of this software.
-- **Always start with testnet.** The bot defaults to testnet mode for a reason.
 - Never trade with funds you cannot afford to lose.
 
 ## License
@@ -311,6 +340,6 @@ Contributions are welcome. Please follow these steps:
 3. Write tests for new functionality
 4. Ensure all tests pass (`npm test`)
 5. Commit your changes with clear, descriptive messages
-6. Open a pull request against `main`
+6. Open a pull request against `master`
 
 For bug reports or feature requests, please open an issue.
