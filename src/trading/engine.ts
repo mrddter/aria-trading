@@ -526,8 +526,16 @@ export class TradingEngine {
           `⏱ ${kimiResult.inferenceMs}ms | FREE (Workers AI)`
         );
       } catch (stratErr) {
-        // If strategist fails, proceed with original setup (fail-open)
-        console.warn(`[Strategist] Kimi K2 failed, proceeding with original: ${(stratErr as Error).message?.slice(0, 80)}`);
+        // If strategist fails, DO NOT proceed (fail-closed)
+        const errMsg = (stratErr as Error).message?.slice(0, 100) || 'unknown';
+        console.warn(`[Strategist] Kimi K2 failed, skipping trade: ${errMsg}`);
+        await this.telegram.sendMessage(
+          `⚠️ <b>Strategist FAILED</b>\n\n` +
+          `<b>Trade:</b> ${setup.direction} ${symbol}\n` +
+          `<b>Error:</b> <i>${errMsg}</i>\n` +
+          `Trade NOT executed (fail-closed)`
+        );
+        return;
       }
     }
 
