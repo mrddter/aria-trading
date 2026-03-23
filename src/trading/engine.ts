@@ -491,7 +491,18 @@ export class TradingEngine {
           if (!decision.adjustedTP && decision.adjusted_tp) decision.adjustedTP = decision.adjusted_tp;
         }
 
-        if (decision && !decision.execute) {
+        if (!decision) {
+          console.log(`[Strategist] Could not parse decision, skipping trade`);
+          await this.telegram.sendMessage(
+            `⚠️ <b>Strategist (${stratResult.model}) PARSE FAILED</b>\n\n` +
+            `<b>Trade:</b> ${setup.direction} ${symbol}\n` +
+            `<b>Raw:</b> <i>${stratResult.text?.slice(0, 200) || 'empty'}</i>\n` +
+            `Trade NOT executed`
+          );
+          return;
+        }
+
+        if (!decision.execute) {
           console.log(`[Strategist] REJECTED: ${decision.reasoning?.slice(0, 100)}`);
           await this.telegram.sendMessage(
             `🧠 <b>Strategist (${stratResult.model}) REJECTED</b>\n\n` +
