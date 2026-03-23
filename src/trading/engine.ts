@@ -419,8 +419,8 @@ export class TradingEngine {
       return;
     }
 
-    // ---- QWEN 3.5 STRATEGIST (Chain-of-Thought reasoning) ----
-    if (this.nvidiaKey) {
+    // ---- KIMI K2 STRATEGIST (Workers AI — free, fast) ----
+    if (this.ai) {
       try {
         // Build context from experience DB
         let historicalContext = '';
@@ -445,7 +445,7 @@ export class TradingEngine {
           'Respond with JSON: {"execute": true/false, "reasoning": "...", "adjustedSL": number|null, "adjustedTP": number|null, "riskScore": 1-10}',
         ].join('\n');
 
-        console.log(`[Strategist] Calling Qwen3.5 + Kimi K2 (A/B) for ${symbol} ${setup.direction}...`);
+        console.log(`[Strategist] Calling Kimi K2 for ${symbol} ${setup.direction}...`);
 
         type StrategistDecision = {
           execute?: boolean;
@@ -462,66 +462,27 @@ export class TradingEngine {
 
         const strategistSystemPrompt = `You are an expert crypto trading strategist. Analyze the trade setup and decide whether to execute. Be conservative - only approve trades with clear edge. Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sentences", "riskScore": 1-10, "adjustedSL": number_or_null, "adjustedTP": number_or_null}. No other text.`;
 
-        // A/B test: run Qwen3.5 and Kimi K2 in parallel
-        const [strategistResult, kimiResult] = await Promise.allSettled([
-          callQwenStrategist(this.nvidiaKey, {
-            prompt: strategistPrompt,
-            systemPrompt: strategistSystemPrompt,
-            temperature: 0.3,
-            maxTokens: 512,
-            enableThinking: false,
-          }),
-          this.ai ? callKimiStrategist(this.ai, {
-            prompt: strategistPrompt,
-            systemPrompt: strategistSystemPrompt,
-            temperature: 0.3,
-            maxTokens: 512,
-          }) : Promise.reject(new Error('No AI binding')),
-        ]);
+        if (!this.ai) throw new Error('No AI binding for strategist');
 
-        // Log Kimi K2 A/B result (does NOT affect trading decisions)
-        if (kimiResult.status === 'fulfilled') {
-          const kimiDecision = extractJson(kimiResult.value.text) as StrategistDecision | null;
-          if (kimiDecision) {
-            if (!kimiDecision.reasoning && kimiDecision.reason) kimiDecision.reasoning = kimiDecision.reason;
-            if (!kimiDecision.riskScore && kimiDecision.risk_score) kimiDecision.riskScore = kimiDecision.risk_score;
-            if (!kimiDecision.riskScore && kimiDecision.risk) kimiDecision.riskScore = kimiDecision.risk;
-          }
-          await this.telegram.sendMessage(
-            `🔬 <b>A/B: Kimi K2</b> ${kimiDecision?.execute ? '✅ APPROVE' : '❌ REJECT'}\n` +
-            `<b>Risk:</b> ${kimiDecision?.riskScore || '?'}/10\n` +
-            `<b>Reasoning:</b> <i>${kimiDecision?.reasoning?.slice(0, 200) || 'N/A'}</i>\n` +
-            `⏱ ${kimiResult.value.inferenceMs}ms | FREE (Workers AI)`
-          );
-          console.log(`[A/B Kimi] ${kimiDecision?.execute ? 'APPROVE' : 'REJECT'} | Risk: ${kimiDecision?.riskScore} | ${kimiResult.value.inferenceMs}ms`);
-        } else {
-          console.warn(`[A/B Kimi] Failed: ${kimiResult.reason?.message?.slice(0, 100)}`);
-        }
+        const kimiResult = await callKimiStrategist(this.ai, {
+          prompt: strategistPrompt,
+          systemPrompt: strategistSystemPrompt,
+          temperature: 0.3,
+          maxTokens: 512,
+        });
 
-        // Use Qwen result (primary strategist)
-        if (strategistResult.status === 'rejected') {
-          throw strategistResult.reason;
-        }
-        const qwenResult = strategistResult.value;
+        console.log(`[Strategist] Kimi K2 responded in ${kimiResult.inferenceMs}ms`);
+        console.log(`[Strategist] Content: ${kimiResult.text?.slice(0, 300)}`);
 
-        console.log(`[Strategist] Qwen3.5 responded in ${qwenResult.inferenceMs}ms, cost: $${qwenResult.estimatedCost.toFixed(4)}`);
-        console.log(`[Strategist] Content length: ${qwenResult.text?.length}, first 200: ${qwenResult.text?.slice(0, 200)}`);
-        console.log(`[Strategist] Thinking length: ${qwenResult.thinkingText?.length}`);
-
-        // Parse strategist decision - try content first, fallback to thinking
-        let decision = extractJson(qwenResult.text) as StrategistDecision | null;
-        if (!decision && qwenResult.thinkingText) {
-          console.log(`[Strategist] No JSON in content (len=${qwenResult.text?.length}), trying thinking (len=${qwenResult.thinkingText?.length})...`);
-          decision = extractJson(qwenResult.thinkingText) as StrategistDecision | null;
-        }
+        // Parse strategist decision
+        let decision = extractJson(kimiResult.text) as StrategistDecision | null;
         if (!decision) {
-          console.log(`[Strategist] JSON extraction FAILED. Content: ${qwenResult.text?.slice(0, 500)}`);
-          console.log(`[Strategist] Thinking tail: ${qwenResult.thinkingText?.slice(-500)}`);
+          console.log(`[Strategist] JSON extraction FAILED. Content: ${kimiResult.text?.slice(0, 500)}`);
         }
 
         console.log(`[Strategist] Parsed decision: ${JSON.stringify(decision)?.slice(0, 300)}`);
 
-        // Normalize field names (Qwen3.5 sometimes uses different casing/names)
+        // Normalize field names
         if (decision) {
           if (!decision.reasoning && decision.reason) decision.reasoning = decision.reason;
           if (!decision.riskScore && decision.risk_score) decision.riskScore = decision.risk_score;
@@ -533,7 +494,7 @@ export class TradingEngine {
         if (decision && !decision.execute) {
           console.log(`[Strategist] REJECTED: ${decision.reasoning?.slice(0, 100)}`);
           await this.telegram.sendMessage(
-            `🧠 <b>Strategist (Qwen3.5) REJECTED</b>\n\n` +
+            `🧠 <b>Strategist (Kimi K2) REJECTED</b>\n\n` +
             `<b>Trade:</b> ${setup.direction} ${symbol}\n` +
             `<b>Reason:</b> <i>${decision.reasoning?.slice(0, 200)}</i>\n` +
             `<b>Risk Score:</b> ${decision.riskScore || '?'}/10`
@@ -555,19 +516,18 @@ export class TradingEngine {
           console.log(`[Strategist] Approved: ${decision.reasoning.slice(0, 100)}`);
         }
 
-        // Notify with thinking trace
+        // Notify
         await this.telegram.sendMessage(
-          `🧠 <b>Strategist (Qwen3.5) APPROVED</b>\n\n` +
+          `🧠 <b>Strategist (Kimi K2) APPROVED</b>\n\n` +
           `<b>Trade:</b> ${setup.direction} ${symbol} @ $${currentPrice.toFixed(4)}\n` +
           `<b>SL:</b> $${setup.stopLoss.toFixed(4)} | <b>TP:</b> $${setup.takeProfit.toFixed(4)}\n` +
           `<b>Risk:</b> ${decision?.riskScore || '?'}/10\n` +
           `<b>Reasoning:</b> <i>${decision?.reasoning?.slice(0, 200) || 'N/A'}</i>\n` +
-          (qwenResult.thinkingText ? `\n💭 <b>Thinking:</b> <i>${qwenResult.thinkingText.slice(0, 300)}...</i>` : '') +
-          `\n⏱ ${qwenResult.inferenceMs}ms | FREE (NVIDIA)`
+          `⏱ ${kimiResult.inferenceMs}ms | FREE (Workers AI)`
         );
       } catch (stratErr) {
         // If strategist fails, proceed with original setup (fail-open)
-        console.warn(`[Strategist] Qwen3.5 failed, proceeding with original: ${(stratErr as Error).message?.slice(0, 80)}`);
+        console.warn(`[Strategist] Kimi K2 failed, proceeding with original: ${(stratErr as Error).message?.slice(0, 80)}`);
       }
     }
 
