@@ -141,14 +141,16 @@ export async function signL1Action(
     structHash
   ));
 
-  // Sign with secp256k1
+  // Sign with secp256k1 (@noble/curves v2: sign() returns Uint8Array)
   const privKeyBytes = hexToBytes(privateKey);
-  const sig = secp256k1.sign(digest, privKeyBytes);
+  // prehash: false because digest is already hashed; format: 'recovered' to get recovery byte
+  const sigBytes = secp256k1.sign(digest, privKeyBytes, { prehash: false, format: 'recovered' });
 
-  // Extract r, s directly as bigint → hex (avoids version-dependent methods)
-  const r = '0x' + sig.r.toString(16).padStart(64, '0');
-  const s = '0x' + sig.s.toString(16).padStart(64, '0');
-  const v = sig.recovery + 27;
+  // recovered format: [recovery_byte, r (32 bytes), s (32 bytes)]
+  const recovery = sigBytes[0];
+  const r = bytesToHex(sigBytes.slice(1, 33));
+  const s = bytesToHex(sigBytes.slice(33, 65));
+  const v = recovery + 27;
 
   return { r, s, v };
 }
