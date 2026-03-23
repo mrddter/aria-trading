@@ -145,8 +145,9 @@ export async function signL1Action(
   const privKeyBytes = hexToBytes(privateKey);
   const sig = secp256k1.sign(digest, privKeyBytes);
 
-  const r = bytesToHex(sig.toCompactRawBytes().slice(0, 32));
-  const s = bytesToHex(sig.toCompactRawBytes().slice(32, 64));
+  const compact = sig.toBytes('compact');
+  const r = bytesToHex(compact.slice(0, 32));
+  const s = bytesToHex(compact.slice(32, 64));
   const v = sig.recovery + 27;
 
   return { r, s, v };
