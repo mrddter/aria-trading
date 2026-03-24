@@ -246,24 +246,30 @@ export class HyperliquidClient implements IExchange {
   async getAccountInfo(): Promise<AccountInfo> {
     const state = await this.getClearinghouseState();
 
-    // Always fetch both perps and spot balance (unified account support)
-    let walletBalance = parseFloat(state.marginSummary.accountValue || '0');
-    let availableBalance = parseFloat(state.withdrawable || '0');
-    console.log(`[Hyperliquid] Perps balance: ${walletBalance}, user: ${this.userAddress}`);
+    // On unified account: spot USDC total is the real balance (doesn't decrease when margin is used)
+    // spot hold = margin locked for perps. Equity = spot total + unrealized PnL.
+    let walletBalance = 0;
+    let availableBalance = 0;
 
-    // Always check spot for USDC balance and add to total
     try {
-      const spotState = await this.infoPost<{ balances: Array<{ coin: string; total: string }> }>({
+      const spotState = await this.infoPost<{
+        balances: Array<{ coin: string; total: string; hold: string }>;
+        tokenToAvailableAfterMaintenance: Array<[number, string]>;
+      }>({
         type: 'spotClearinghouseState',
         user: this.userAddress,
       });
       const usdcBalance = spotState.balances?.find(b => b.coin === 'USDC');
-      const spotUsdc = parseFloat(usdcBalance?.total || '0');
-      console.log(`[Hyperliquid] Spot USDC: ${spotUsdc}`);
-      walletBalance += spotUsdc;
-      availableBalance += spotUsdc;
+      walletBalance = parseFloat(usdcBalance?.total || '0');
+      // Available after maintenance = what can be used for new positions
+      const availEntry = spotState.tokenToAvailableAfterMaintenance?.find(a => a[0] === 0);
+      availableBalance = availEntry ? parseFloat(availEntry[1]) : walletBalance;
+      console.log(`[Hyperliquid] Spot USDC: ${walletBalance}, hold: ${usdcBalance?.hold || '0'}, available: ${availableBalance}`);
     } catch (e) {
-      console.error(`[Hyperliquid] Spot balance fetch failed: ${(e as Error).message}`);
+      // Fallback to perps-only balance
+      walletBalance = parseFloat(state.marginSummary.accountValue || '0');
+      availableBalance = parseFloat(state.withdrawable || '0');
+      console.error(`[Hyperliquid] Spot balance fetch failed, using perps: ${(e as Error).message}`);
     }
 
     const totalUnrealized = state.assetPositions.reduce(
