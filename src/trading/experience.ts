@@ -497,13 +497,14 @@ export class ExperienceDB {
       this.db
         .prepare(
           `SELECT COUNT(*) as total,
+          SUM(CASE WHEN was_correct IS NOT NULL THEN 1 ELSE 0 END) as evaluated,
           SUM(CASE WHEN was_correct=1 THEN 1 ELSE 0 END) as correct
-        FROM news_events WHERE was_correct IS NOT NULL`
+        FROM news_events`
         )
-        .first<{ total: number; correct: number }>(),
+        .first<{ total: number; evaluated: number; correct: number }>(),
       this.db
         .prepare(
-          'SELECT COUNT(*) as count FROM patterns WHERE occurrences >= 3'
+          'SELECT COUNT(*) as count FROM patterns'
         )
         .first<{ count: number }>(),
       this.db
@@ -533,8 +534,8 @@ export class ExperienceDB {
 
     // News stats
     msg += `\n<b>News analyzed:</b> ${newsStats?.total || 0}\n`;
-    if (newsStats?.total) {
-      msg += `  Prediction accuracy: ${(((newsStats.correct || 0) / newsStats.total) * 100).toFixed(0)}%\n`;
+    if (newsStats?.evaluated) {
+      msg += `  Prediction accuracy: ${(((newsStats.correct || 0) / newsStats.evaluated) * 100).toFixed(0)}% (${newsStats.evaluated} evaluated)\n`;
     }
 
     // Patterns
