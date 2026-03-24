@@ -39,7 +39,7 @@ type Bindings = {
 const app = new Hono<{ Bindings: Bindings }>();
 
 function getStartingBalance(env: { EXCHANGE?: string }): number {
-  return (env.EXCHANGE || 'binance').toLowerCase() === 'hyperliquid' ? 60 : 5000;
+  return (env.EXCHANGE || 'binance').toLowerCase() === 'hyperliquid' ? 61.54 : 5000;
 }
 
 // Health check
