@@ -18,6 +18,7 @@ import { shouldExecuteSentimentSignal } from './strategies/market-neutral-filter
 import { calculatePositionSize } from './risk';
 import { detectRegime, RegimeParams, formatRegimeTelegram } from './regime';
 import { ExperienceDB } from './experience';
+import { calculateCompositeScore } from './composite-score';
 import { costTracker, extractJson } from '../wavespeed/client';
 import { callQwenStrategist } from '../wavespeed/nvidia';
 import type { AiBinding } from '../wavespeed/workers-ai';
@@ -403,7 +404,7 @@ export class TradingEngine {
         const recentTrade = await this.experience.getLastTrade(symbol);
         if (recentTrade && recentTrade.pnl < 0) {
           const closedAt = new Date(recentTrade.closed_at).getTime();
-          const cooldownMs = 2 * 60 * 60 * 1000; // 2 hours
+          const cooldownMs = 1 * 60 * 60 * 1000; // 1 hour
           if (Date.now() - closedAt < cooldownMs) {
             const minsLeft = Math.ceil((cooldownMs - (Date.now() - closedAt)) / 60000);
             console.log(`[Event] ${symbol} on cooldown after loss (${minsLeft}min left), skipping`);
@@ -437,14 +438,27 @@ export class TradingEngine {
       return;
     }
 
-    // Hard regime filter: block counter-regime trades with low confidence
-    const regime = this.currentRegime?.regime;
-    if (regime === 'EXTREME_FEAR' && setup.direction === 'LONG' && signal.confidence < 0.85) {
-      console.log(`[Event] ${symbol} LONG blocked: EXTREME_FEAR regime + confidence ${signal.confidence.toFixed(2)} < 0.85`);
-      return;
-    }
-    if (regime === 'EXTREME_GREED' && setup.direction === 'SHORT' && signal.confidence < 0.85) {
-      console.log(`[Event] ${symbol} SHORT blocked: EXTREME_GREED regime + confidence ${signal.confidence.toFixed(2)} < 0.85`);
+    // ---- COMPOSITE SCORE (multi-factor quality gate) ----
+    const composite = calculateCompositeScore(
+      signal, highs, lows, closes, volumes,
+      setup.direction,
+      this.currentRegime?.regime,
+    );
+
+    console.log(`[Composite] ${symbol} ${setup.direction}: ${composite.score}/100 ` +
+      `(Sent:${composite.breakdown.sentiment} Mom:${composite.breakdown.momentum} ` +
+      `Vol:${composite.breakdown.volatility} Trend:${composite.breakdown.trend} ` +
+      `Reg:${composite.breakdown.regime}) size=${composite.sizeMultiplier}x`);
+
+    if (!composite.approved) {
+      console.log(`[Composite] REJECTED: ${composite.reason}`);
+      await this.telegram.notifyEvent({
+        asset: signal.asset,
+        sentiment: signal.sentimentScore,
+        magnitude: signal.magnitude,
+        headline: item.text.slice(0, 200),
+        action: `SKIP: Composite ${composite.score}/100 (min 40)`,
+      });
       return;
     }
 
@@ -464,13 +478,16 @@ export class TradingEngine {
         const strategistPrompt = [
           `ASSET: ${symbol} @ $${currentPrice.toFixed(4)}`,
           `SIGNAL: ${setup.direction} | Sentiment: ${signal.sentimentScore.toFixed(2)} | Confidence: ${signal.confidence.toFixed(2)} | Magnitude: ${signal.magnitude.toFixed(2)}`,
+          `COMPOSITE SCORE: ${composite.score}/100 (Sentiment:${composite.breakdown.sentiment} Momentum:${composite.breakdown.momentum} Volatility:${composite.breakdown.volatility} Trend:${composite.breakdown.trend} Regime:${composite.breakdown.regime})`,
+          `SIZE MULTIPLIER: ${composite.sizeMultiplier}x`,
           `QUANT: ATR=$${setup.atr?.toFixed(4) || '?'}`,
           `REGIME: ${this.currentRegime?.regime || 'UNKNOWN'} (F&G: ${this.currentRegime ? 'active' : 'n/a'})`,
           `NEWS: "${item.text.slice(0, 300)}"`,
           `PROPOSED SL: $${setup.stopLoss.toFixed(4)} | TP: $${setup.takeProfit.toFixed(4)}`,
           historicalContext ? `\n${historicalContext}` : '',
           '',
-          'Analyze this trade setup. Should we execute? If yes, suggest adjustments to SL/TP if needed.',
+          'Analyze this trade setup. The composite score already factors momentum, volatility, trend, and regime.',
+          'REJECT if: composite score < 50, OR momentum + trend both below 40, OR historical context shows repeated losses.',
           'Respond with JSON: {"execute": true/false, "reasoning": "...", "adjustedSL": number|null, "adjustedTP": number|null, "riskScore": 1-10}',
         ].join('\n');
 
@@ -492,8 +509,8 @@ export class TradingEngine {
         const strategistSystemPrompt = `You are an expert crypto trading strategist managing a small account ($60). Rules:
 1. Be VERY conservative - only approve trades with clear edge.
 2. REJECT if historical context shows losing pattern (low win rate, negative avg PnL) for this asset/direction/regime.
-3. In EXTREME_FEAR regime: only approve LONG if confidence >= 0.85 AND magnitude >= 0.7. Prefer SHORT.
-4. In EXTREME_GREED regime: only approve SHORT if confidence >= 0.85 AND magnitude >= 0.7. Prefer LONG.
+3. In EXTREME_FEAR regime: only approve LONG if confidence >= 0.70 AND magnitude >= 0.7. Prefer SHORT.
+4. In EXTREME_GREED regime: only approve SHORT if confidence >= 0.70 AND magnitude >= 0.7. Prefer LONG.
 5. If the same asset has been traded too recently or has a poor track record, REJECT.
 6. Weight historical data heavily - past losses on this setup should bias towards rejection.
 Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sentences", "riskScore": 1-10, "adjustedSL": number_or_null, "adjustedTP": number_or_null}. No other text.`;
@@ -568,7 +585,8 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
           `🧠 <b>Strategist (${stratResult.model}) APPROVED</b>\n\n` +
           `<b>Trade:</b> ${setup.direction} ${symbol} @ $${currentPrice.toFixed(4)}\n` +
           `<b>SL:</b> $${setup.stopLoss.toFixed(4)} | <b>TP:</b> $${setup.takeProfit.toFixed(4)}\n` +
-          `<b>Risk:</b> ${decision?.riskScore || '?'}/10\n` +
+          `<b>Score:</b> ${composite.score}/100 (S:${composite.breakdown.sentiment} M:${composite.breakdown.momentum} V:${composite.breakdown.volatility} T:${composite.breakdown.trend} R:${composite.breakdown.regime})\n` +
+          `<b>Size:</b> ${composite.sizeMultiplier}x | <b>Risk:</b> ${decision?.riskScore || '?'}/10\n` +
           `<b>Reasoning:</b> <i>${decision?.reasoning?.slice(0, 200) || 'N/A'}</i>\n` +
           `⏱ ${stratResult.inferenceMs}ms | FREE (Workers AI)`
         );
@@ -615,7 +633,7 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
     // Execute trade
     console.log(`[Event] Executing trade: ${setup.direction} ${symbol}, balance: ${account.availableBalance}`);
     const balance = parseFloat(account.availableBalance);
-    await this.executeTrade(symbol, setup.direction, currentPrice, setup.stopLoss, setup.takeProfit, balance, 'event-driven', signal);
+    await this.executeTrade(symbol, setup.direction, currentPrice, setup.stopLoss, setup.takeProfit, balance, 'event-driven', signal, composite.sizeMultiplier);
   }
 
   /**
@@ -685,7 +703,8 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
     takeProfit: number,
     balance: number,
     strategy: string,
-    signal?: SentimentSignal
+    signal?: SentimentSignal,
+    compositeMultiplier: number = 1.0
   ): Promise<void> {
     try {
       // Dynamic parameters based on market regime
@@ -710,20 +729,23 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
         return;
       }
 
-      // Position sizing with regime-adjusted risk
+      // Position sizing with regime-adjusted risk + composite score scaling
+      const adjustedMaxSize = this.config.maxPositionSizeUsdt * compositeMultiplier;
       const posSize = calculatePositionSize(
         balance,
-        effectiveRisk,
+        effectiveRisk * compositeMultiplier,
         price,
         stopLoss,
         effectiveLeverage,
-        this.config.maxPositionSizeUsdt
+        adjustedMaxSize
       );
 
       if (posSize <= 0) {
         console.log(`[Trade] ${symbol} size=0, skipping`);
         return;
       }
+
+      console.log(`[Trade] ${symbol} composite size multiplier: ${compositeMultiplier}x → max $${adjustedMaxSize.toFixed(0)}`);
 
       // Verify symbol exists on exchange
       if (!this.exchange.isSymbolAvailable(symbol)) {
