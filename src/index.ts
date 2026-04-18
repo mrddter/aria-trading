@@ -435,16 +435,8 @@ function getEngine(env: Bindings): TradingEngine {
 
     const isHyperliquid = (env.EXCHANGE || 'binance').toLowerCase() === 'hyperliquid';
     const config: EngineConfig = {
-      symbols: isHyperliquid ? [
-        'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'HYPEUSDT',
-        'BNBUSDT', 'DOGEUSDT', 'SUIUSDT', 'AVAXUSDT', 'LINKUSDT',
-        'ARBUSDT', 'OPUSDT', 'NEARUSDT', 'AAVEUSDT',
-      ] : [
-        'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
-        'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT',
-      ],
       leverage: isHyperliquid ? 3 : 10,
-      riskPerTrade: isHyperliquid ? 2 : 2,
+      riskPerTrade: 2,
       maxPositionSizeUsdt: isHyperliquid ? 15 : 500,
       maxPositions: isHyperliquid ? 3 : 6,
       enableEventDriven: true,

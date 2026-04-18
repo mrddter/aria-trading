@@ -26,7 +26,6 @@ import type { SentimentSignal, SentimentSnapshot } from '../sentiment/types';
 import type { RawTextItem } from '../ingestion/sources';
 
 export interface EngineConfig {
-  symbols: string[];
   leverage: number;
   riskPerTrade: number;
   maxPositionSizeUsdt: number;
