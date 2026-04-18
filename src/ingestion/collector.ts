@@ -10,6 +10,7 @@ import {
   fetchAllReddit,
   fetchBinanceAnnouncements,
   fetchFearAndGreed,
+  fetchAllRss,
 } from './sources';
 
 export interface CollectorResult {
@@ -31,16 +32,18 @@ export async function collectEvents(
   const allItems: RawTextItem[] = [];
 
   // Fetch from all sources in parallel
-  const [ccNews, reddit, binanceAnn, fearGreed] = await Promise.allSettled([
+  const [ccNews, reddit, binanceAnn, rss, fearGreed] = await Promise.allSettled([
     fetchCryptoCompareNews(30),
     fetchAllReddit(),
     fetchBinanceAnnouncements(10),
+    fetchAllRss(),
     fetchFearAndGreed(),
   ]);
 
   if (ccNews.status === 'fulfilled') allItems.push(...ccNews.value);
   if (reddit.status === 'fulfilled') allItems.push(...reddit.value);
   if (binanceAnn.status === 'fulfilled') allItems.push(...binanceAnn.value);
+  if (rss.status === 'fulfilled') allItems.push(...rss.value);
 
   const fg = fearGreed.status === 'fulfilled'
     ? fearGreed.value

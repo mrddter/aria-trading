@@ -94,8 +94,10 @@ export async function fetchCryptoCompareHistoricalNews(
 
 // ==========================================
 // Reddit (free, no auth for public JSON)
+// Filtered: only r/cryptocurrency hot posts with score >= 100,
+// because lower-score posts are pure noise that wastes LLM inference.
 // ==========================================
-const REDDIT_SUBS = ['cryptocurrency', 'bitcoin', 'ethtrader', 'CryptoMarkets'];
+const REDDIT_MIN_SCORE = 100;
 
 export async function fetchRedditPosts(
   subreddit: string = 'cryptocurrency',
@@ -124,28 +126,137 @@ export async function fetchRedditPosts(
     };
   };
 
-  return data.data.children.map((post) => ({
-    id: `reddit_${post.data.id}`,
-    text: `${post.data.title}. ${(post.data.selftext || '').slice(0, 200)}`,
-    source: `reddit_${subreddit}`,
-    publishedAt: post.data.created_utc * 1000,
-    url: `https://reddit.com${post.data.permalink}`,
-    categories: [`score:${post.data.score}`, `comments:${post.data.num_comments}`],
-  }));
+  return data.data.children
+    .filter((post) => (post.data.score || 0) >= REDDIT_MIN_SCORE)
+    .map((post) => ({
+      id: `reddit_${post.data.id}`,
+      text: `${post.data.title}. ${(post.data.selftext || '').slice(0, 200)}`,
+      source: `reddit_${subreddit}`,
+      publishedAt: post.data.created_utc * 1000,
+      url: `https://reddit.com${post.data.permalink}`,
+      categories: [`score:${post.data.score}`, `comments:${post.data.num_comments}`],
+    }));
 }
 
 export async function fetchAllReddit(): Promise<RawTextItem[]> {
-  const results: RawTextItem[] = [];
-  for (const sub of REDDIT_SUBS) {
-    try {
-      const posts = await fetchRedditPosts(sub, 15);
-      results.push(...posts);
-    } catch {
-      // Silently skip failed subreddits
-    }
-    await new Promise((r) => setTimeout(r, 1000)); // Rate limit
+  // Single subreddit, high-signal-only. r/cryptocurrency is the largest.
+  try {
+    return await fetchRedditPosts('cryptocurrency', 25);
+  } catch {
+    return [];
   }
-  return results;
+}
+
+// ==========================================
+// RSS feeds — Tier 1 crypto news (free, no auth)
+// CoinDesk, CoinTelegraph, The Block, Decrypt, Bitcoin Magazine
+// ==========================================
+
+interface RssFeed {
+  url: string;
+  source: string;
+}
+
+const RSS_FEEDS: RssFeed[] = [
+  { url: 'https://www.coindesk.com/arc/outboundfeeds/rss/', source: 'coindesk' },
+  { url: 'https://cointelegraph.com/rss', source: 'cointelegraph' },
+  { url: 'https://www.theblock.co/rss.xml', source: 'theblock' },
+  { url: 'https://decrypt.co/feed', source: 'decrypt' },
+  { url: 'https://bitcoinmagazine.com/.rss/full/', source: 'bitcoinmagazine' },
+];
+
+/**
+ * Minimal RSS parser using regex — Cloudflare Workers has no DOMParser.
+ * Extracts <item> blocks and pulls title/link/pubDate/description.
+ * Handles CDATA and basic HTML entity decoding.
+ */
+function parseRss(xml: string, source: string, maxItems = 30): RawTextItem[] {
+  const items: RawTextItem[] = [];
+  const itemRegex = /<item[^>]*>([\s\S]*?)<\/item>/gi;
+  let match: RegExpExecArray | null;
+  let count = 0;
+
+  while ((match = itemRegex.exec(xml)) !== null && count < maxItems) {
+    const block = match[1];
+    const title = extractTag(block, 'title');
+    const link = extractTag(block, 'link');
+    const pubDate = extractTag(block, 'pubDate');
+    const description = extractTag(block, 'description');
+    const guid = extractTag(block, 'guid');
+
+    if (!title) continue;
+
+    const ts = pubDate ? Date.parse(pubDate) : Date.now();
+    if (isNaN(ts)) continue;
+
+    const id = `${source}_${guid || link || title.slice(0, 60)}`.replace(/\s+/g, '_').slice(0, 200);
+    const cleanDesc = description ? stripHtml(description).slice(0, 300) : '';
+    const text = cleanDesc ? `${title}. ${cleanDesc}` : title;
+
+    items.push({
+      id,
+      text,
+      source,
+      publishedAt: ts,
+      url: link || undefined,
+      relatedAssets: extractAssetsFromText(text),
+    });
+    count++;
+  }
+  return items;
+}
+
+function extractTag(block: string, tag: string): string {
+  // Match either <tag>...</tag> or <tag><![CDATA[...]]></tag>
+  const re = new RegExp(`<${tag}[^>]*>(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?<\\/${tag}>`, 'i');
+  const m = block.match(re);
+  if (!m) return '';
+  return decodeEntities(m[1].trim());
+}
+
+function stripHtml(s: string): string {
+  return s.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    // Numeric entities (decimal and hex), e.g. &#8217; &#x2019;
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)));
+}
+
+export async function fetchRssFeed(feed: RssFeed, limit = 30): Promise<RawTextItem[]> {
+  try {
+    const res = await fetch(feed.url, {
+      headers: { 'User-Agent': 'AriaBot/1.0 (+news aggregator)' },
+      // Workers fetch has 30s default; keep RSS calls snappy
+      cf: { cacheTtl: 60 } as any,
+    });
+    if (!res.ok) {
+      console.warn(`[RSS] ${feed.source} HTTP ${res.status}`);
+      return [];
+    }
+    const xml = await res.text();
+    return parseRss(xml, feed.source, limit);
+  } catch (err) {
+    console.warn(`[RSS] ${feed.source} failed: ${(err as Error).message?.slice(0, 80)}`);
+    return [];
+  }
+}
+
+export async function fetchAllRss(): Promise<RawTextItem[]> {
+  const results = await Promise.allSettled(RSS_FEEDS.map((f) => fetchRssFeed(f, 25)));
+  const items: RawTextItem[] = [];
+  for (const r of results) {
+    if (r.status === 'fulfilled') items.push(...r.value);
+  }
+  return items;
 }
 
 // ==========================================
