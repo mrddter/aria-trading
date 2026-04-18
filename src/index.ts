@@ -25,13 +25,13 @@ type Bindings = {
   HL_WALLET_ADDRESS?: string;
   HL_VAULT_ADDRESS?: string;
   HL_TESTNET?: string;
-  WAVESPEED_API_KEY: string;
+  WAVESPEED_API_KEY?: string; // Deprecated: kept optional for backward compat
+  NVIDIA_API_KEY?: string;    // Deprecated: kept optional for backward compat
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_CHAT_ID: string;
   ENVIRONMENT: string;
   BOT_ACTIVE: string;
-  AI?: AiBinding;
-  NVIDIA_API_KEY?: string;
+  AI: AiBinding;
   COSTS: KVNamespace;
   DB: D1Database;
 };
@@ -449,11 +449,10 @@ function getEngine(env: Bindings): TradingEngine {
       maxPositions: isHyperliquid ? 3 : 6,
       enableEventDriven: true,
       enableMarketNeutral: !isHyperliquid, // Disable for now (no hedge mode)
-      analystModel: 'anthropic/claude-haiku-4.5',
-      highImpactModel: 'anthropic/claude-sonnet-4.5',
     };
 
-    engine = new TradingEngine(exchange, telegram, env.WAVESPEED_API_KEY, config, env.AI, env.DB, env.NVIDIA_API_KEY);
+    if (!env.AI) throw new Error('AI binding required (Workers AI)');
+    engine = new TradingEngine(exchange, telegram, config, env.AI, env.DB);
   }
   return engine;
 }

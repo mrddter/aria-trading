@@ -20,7 +20,6 @@ import { detectRegime, RegimeParams, formatRegimeTelegram } from './regime';
 import { ExperienceDB } from './experience';
 import { calculateCompositeScore } from './composite-score';
 import { costTracker, extractJson } from '../wavespeed/client';
-import { callQwenStrategist } from '../wavespeed/nvidia';
 import type { AiBinding } from '../wavespeed/workers-ai';
 import { callStrategist } from '../wavespeed/workers-ai';
 import type { SentimentSignal, SentimentSnapshot } from '../sentiment/types';
@@ -34,8 +33,6 @@ export interface EngineConfig {
   maxPositions: number;
   enableEventDriven: boolean;
   enableMarketNeutral: boolean;
-  analystModel: string;
-  highImpactModel: string;
 }
 
 interface SoftOrder {
@@ -61,9 +58,8 @@ export function getSoftOrderKeys(): string[] {
 export class TradingEngine {
   private exchange: IExchange;
   private telegram: TelegramBot;
-  private wavespeedKey: string;
   private config: EngineConfig;
-  private ai?: AiBinding;
+  private ai: AiBinding;
   // NOTE: Worker is stateless - these reset each invocation.
   // For MVP this is fine: we process ALL recent items each cycle.
   // In production, use KV or D1 for persistence.
@@ -73,7 +69,6 @@ export class TradingEngine {
   private lastFearGreed: number = 50;
   private firstRun = true;
   private experience?: ExperienceDB;
-  private nvidiaKey?: string;
   // Cache account info per cycle to avoid redundant API calls (Binance rate limits)
   private cachedAccount: AccountInfo | null = null;
   private cachedAccountTs = 0;
@@ -81,19 +76,15 @@ export class TradingEngine {
   constructor(
     exchange: IExchange,
     telegram: TelegramBot,
-    wavespeedKey: string,
     config: EngineConfig,
-    ai?: AiBinding,
+    ai: AiBinding,
     db?: D1Database,
-    nvidiaKey?: string
   ) {
     this.exchange = exchange;
     this.telegram = telegram;
-    this.wavespeedKey = wavespeedKey;
     this.config = config;
     this.ai = ai;
     if (db) this.experience = new ExperienceDB(db);
-    this.nvidiaKey = nvidiaKey;
   }
 
   /** Get account info with 30s cache to avoid redundant API calls */
@@ -220,15 +211,10 @@ export class TradingEngine {
         }
       }
 
-      // 4. Process normal items - Llama 4 Scout (free) if available, else Haiku 4.5
+      // 4. Process normal items via Workers AI (Llama 4 Scout primary, GPT-OSS 20B fallback).
       if (normalItems.length > 0) {
         const batchInput = normalItems.slice(0, 15); // Max 15 per cycle for cost control
-        const signals = await processBatch(
-          this.wavespeedKey,
-          batchInput,
-          this.config.analystModel,
-          this.ai // Pass Workers AI binding (Llama 4 Scout) if available
-        );
+        const signals = await processBatch(this.ai, batchInput);
         this.sentimentHistory.push(...signals);
 
         // Enrich D1 news_events rows with sentiment from LLM (A1.1).
@@ -376,13 +362,8 @@ export class TradingEngine {
   private async processEventDriven(item: RawTextItem): Promise<void> {
     console.log(`[Event] Processing: ${item.text.slice(0, 80)}...`);
 
-    // LLM Sensor: Qwen 3.5 (NVIDIA, free) → fallback WaveSpeed Haiku 4.5
-    const signal = await processHighImpactItem(
-      this.wavespeedKey,
-      item,
-      this.config.highImpactModel,
-      this.nvidiaKey
-    );
+    // LLM Sensor: Workers AI gpt-oss-120b → gpt-oss-20b → llama-4-scout (all free).
+    const signal = await processHighImpactItem(this.ai, item);
 
     if (!signal) {
       console.log('[Event] LLM returned no signal');
