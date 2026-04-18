@@ -31,6 +31,12 @@ export interface EventTradeSetup {
   takeProfit: number;
   atr: number;
   timeoutHours: number; // close after N hours if SL/TP not hit
+  indicators: {
+    rsi: number;
+    adx: number;
+    atr: number;
+    volumeRatio: number;
+  };
 }
 
 /**
@@ -47,68 +53,68 @@ export function evaluateEventSignal(
 ): EventTradeSetup {
   const symbol = signal.asset + 'USDT';
 
+  // Indicators (computed up-front so we can attach them to every reject/approve).
+  const rsi = calculateRSI(closes);
+  const adxRes = calculateADX(highs, lows, closes);
+  const atr = calculateATR(highs, lows, closes);
+  const avgVol = calculateVolumeSMA(volumes, 20);
+  const recentVol = volumes.slice(-3).reduce((a, b) => a + b, 0) / 3;
+  const volumeRatio = avgVol > 0 ? recentVol / avgVol : 1;
+  const indicators = { rsi, adx: adxRes.adx, atr, volumeRatio };
+
   // --- Gate 1: Magnitude threshold ---
   if (signal.magnitude < 0.5) {
-    return reject(symbol, 'Magnitude too low (<0.5)');
+    return reject(symbol, 'Magnitude too low (<0.5)', indicators);
   }
 
   // --- Gate 2: Confidence threshold ---
-  if (signal.confidence < 0.6) {
-    return reject(symbol, 'Confidence too low (<0.6)');
+  if (signal.confidence < 0.7) {
+    return reject(symbol, 'Confidence too low (<0.7)', indicators);
   }
 
   // --- Gate 3: Sentiment must have clear direction ---
   if (Math.abs(signal.sentimentScore) < 0.3) {
-    return reject(symbol, 'Sentiment too neutral (|score| < 0.3)');
+    return reject(symbol, 'Sentiment too neutral (|score| < 0.3)', indicators);
   }
 
   const direction: 'LONG' | 'SHORT' =
     signal.sentimentScore > 0 ? 'LONG' : 'SHORT';
 
   // --- Gate 4: RSI not at extreme in trade direction ---
-  const rsi = calculateRSI(closes);
   if (direction === 'LONG' && rsi > 75) {
-    return reject(symbol, `RSI too high for LONG (${rsi.toFixed(0)})`);
+    return reject(symbol, `RSI too high for LONG (${rsi.toFixed(0)})`, indicators);
   }
   if (direction === 'SHORT' && rsi < 25) {
-    return reject(symbol, `RSI too low for SHORT (${rsi.toFixed(0)})`);
+    return reject(symbol, `RSI too low for SHORT (${rsi.toFixed(0)})`, indicators);
   }
 
   // --- Gate 5: Price hasn't already moved too much ---
-  // Check if price moved >3% in the last 3 candles (event already priced in)
+  // Check if price moved >6% in the last 3 candles (event already priced in)
   if (closes.length >= 4) {
     const recentMove = Math.abs(
       (closes[closes.length - 1] - closes[closes.length - 4]) / closes[closes.length - 4]
     );
-    if (recentMove > 0.03) {
-      return reject(symbol, `Price already moved ${(recentMove * 100).toFixed(1)}% (>3%)`);
+    if (recentMove > 0.06) {
+      return reject(symbol, `Price already moved ${(recentMove * 100).toFixed(1)}% (>6%)`, indicators);
     }
   }
 
-  // --- Gate 6: Volume confirmation ---
-  const avgVol = calculateVolumeSMA(volumes, 20);
-  const recentVol = volumes.slice(-3).reduce((a, b) => a + b, 0) / 3;
-  const volumeRatio = avgVol > 0 ? recentVol / avgVol : 1;
-
-  // For events, we actually WANT elevated volume (market is reacting)
-  // But not too extreme (liquidity might be poor)
-  // Skip this gate for now - events may precede the volume spike
+  // --- Gate 6: Anti-bounce-trap for SHORT in EXTREME_FEAR (RSI<30 = oversold) ---
+  // Caller passes regime via separate path; this gate is in composite-score for now.
 
   // --- Gate 7: Trend alignment (bonus, not required) ---
-  const adx = calculateADX(highs, lows, closes);
   const ema20 = calculateEMA(closes, 20);
   const lastEma20 = ema20[ema20.length - 1];
   let trendBonus = 0;
 
-  if (direction === 'LONG' && currentPrice > lastEma20 && adx.plusDI > adx.minusDI) {
+  if (direction === 'LONG' && currentPrice > lastEma20 && adxRes.plusDI > adxRes.minusDI) {
     trendBonus = 0.1; // trend alignment bonus
   }
-  if (direction === 'SHORT' && currentPrice < lastEma20 && adx.minusDI > adx.plusDI) {
+  if (direction === 'SHORT' && currentPrice < lastEma20 && adxRes.minusDI > adxRes.plusDI) {
     trendBonus = 0.1;
   }
 
   // --- Calculate SL/TP ---
-  const atr = calculateATR(highs, lows, closes);
   const slMultiplier = 1.5; // Tight SL for event trades
   const tpMultiplier = 2.5; // Quick TP
 
@@ -143,11 +149,16 @@ export function evaluateEventSignal(
     stopLoss,
     takeProfit,
     atr,
-    timeoutHours: 4, // Close after 4 hours if no SL/TP
+    timeoutHours: 2, // Close after 2 hours if no SL/TP (event edge decays)
+    indicators,
   };
 }
 
-function reject(symbol: string, reason: string): EventTradeSetup {
+function reject(
+  symbol: string,
+  reason: string,
+  indicators: { rsi: number; adx: number; atr: number; volumeRatio: number },
+): EventTradeSetup {
   return {
     approved: false,
     reason,
@@ -159,5 +170,6 @@ function reject(symbol: string, reason: string): EventTradeSetup {
     takeProfit: 0,
     atr: 0,
     timeoutHours: 0,
+    indicators,
   };
 }

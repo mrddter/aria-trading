@@ -159,6 +159,38 @@ export class ExperienceDB {
     return row?.id || 0;
   }
 
+  /** Enrich an existing news_events row with LLM sentiment data, matching by title. */
+  async enrichNewsByTitle(
+    title: string,
+    asset: string | undefined,
+    sentimentScore: number,
+    confidence: number,
+    magnitude: number,
+    category: string,
+  ): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE news_events
+         SET asset = COALESCE(?, asset),
+             sentiment_score = ?,
+             confidence = ?,
+             magnitude = ?,
+             category = ?
+         WHERE title = ?
+           AND processed_at > datetime('now', '-3 hours')
+           AND sentiment_score IS NULL`
+      )
+      .bind(
+        asset || null,
+        sentimentScore,
+        confidence,
+        magnitude,
+        category,
+        title,
+      )
+      .run();
+  }
+
   /** Update news with actual price outcome (called by cron job later) */
   async updateNewsOutcomes(): Promise<number> {
     // Find news events from 1h, 4h, 24h ago that need price updates
@@ -220,6 +252,58 @@ export class ExperienceDB {
   }
 
   // ---- DAILY SNAPSHOTS ----
+
+  /**
+   * Compute today's stats from D1 and persist a daily_snapshots row (A1.7).
+   * Idempotent: re-running on the same date overwrites.
+   */
+  async computeAndSaveDailySnapshot(args: {
+    date: string; // YYYY-MM-DD (UTC)
+    endingBalance: number;
+    startingBalance: number;
+    regime: string;
+    fearGreed: number;
+    btcChangePercent: number;
+    llmCost: number;
+    llmCalls: number;
+  }): Promise<void> {
+    const opened = await this.db
+      .prepare(
+        `SELECT COUNT(*) as n FROM trades WHERE date(opened_at) = ?`
+      )
+      .bind(args.date)
+      .first<{ n: number }>();
+
+    const closed = await this.db
+      .prepare(
+        `SELECT
+          COUNT(*) as n,
+          SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+          SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses,
+          COALESCE(SUM(pnl), 0) as realized_pnl
+         FROM trades WHERE status = 'CLOSED' AND date(closed_at) = ?`
+      )
+      .bind(args.date)
+      .first<{ n: number; wins: number; losses: number; realized_pnl: number }>();
+
+    await this.saveDailySnapshot({
+      date: args.date,
+      startingBalance: args.startingBalance,
+      endingBalance: args.endingBalance,
+      realizedPnl: closed?.realized_pnl || 0,
+      unrealizedPnl: 0,
+      fees: 0, // Not tracked per-day yet
+      tradesOpened: opened?.n || 0,
+      tradesClosed: closed?.n || 0,
+      wins: closed?.wins || 0,
+      losses: closed?.losses || 0,
+      regime: args.regime,
+      fearGreedAvg: args.fearGreed,
+      btcChangePercent: args.btcChangePercent,
+      llmCost: args.llmCost,
+      llmCalls: args.llmCalls,
+    });
+  }
 
   async saveDailySnapshot(snapshot: {
     date: string;

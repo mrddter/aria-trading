@@ -2,9 +2,9 @@ name = "binance-trading-bot"
 main = "src/index.ts"
 compatibility_date = "2026-03-01"
 
-# Cron: every 5 minutes (collect + process + trade)
+# Cron: every 5 minutes (collect + process + trade), and 23:05 UTC daily for snapshot
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["*/5 * * * *", "5 23 * * *"]
 
 [vars]
 ENVIRONMENT = "mainnet"

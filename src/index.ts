@@ -2,8 +2,8 @@
  * Binance Trading Bot - Cloudflare Worker Entry Point
  *
  * Cron triggers:
- * - Every 2 min: collect news, process through LLM, event-driven trades
- * - Every 4 hours: market-neutral rebalancing
+ * - Every 5 min: collect news, process through LLM, event-driven trades
+ * - 23:05 UTC daily: persist daily_snapshots row
  */
 
 import { Hono } from 'hono';
@@ -468,6 +468,35 @@ export default {
       return;
     }
 
+    console.log(`[Cron] ${event.cron} triggered`);
+
+    // Daily snapshot cron (A1.7): runs at 23:05 UTC, separate from trading cycle.
+    if (event.cron === '5 23 * * *') {
+      if (!env.DB) return;
+      try {
+        const exchange = createExchange(env);
+        await exchange.loadExchangeInfo();
+        const account = await exchange.getAccountInfo();
+        const btcTicker = await exchange.getTicker24hr('BTCUSDT').catch(() => ({ priceChangePercent: '0' }));
+        const exp = new ExperienceDB(env.DB);
+        const today = new Date().toISOString().slice(0, 10); // UTC YYYY-MM-DD
+        await exp.computeAndSaveDailySnapshot({
+          date: today,
+          endingBalance: parseFloat(account.totalWalletBalance || '0'),
+          startingBalance: getStartingBalance(env),
+          regime: 'UNKNOWN', // populated when we have intraday tracking
+          fearGreed: 50,
+          btcChangePercent: parseFloat(btcTicker.priceChangePercent || '0'),
+          llmCost: costTracker.totalCostUsd,
+          llmCalls: costTracker.totalCalls,
+        });
+        console.log(`[DailySnapshot] Saved snapshot for ${today}`);
+      } catch (e) {
+        console.error(`[DailySnapshot] Failed:`, (e as Error).message);
+      }
+      return;
+    }
+
     const eng = getEngine(env);
     const now = Date.now();
 
@@ -482,7 +511,6 @@ export default {
 
     // Collect + process + rebalance in same invocation
     // (Worker is stateless - must do everything in one shot)
-    console.log(`[Cron] ${event.cron} triggered`);
 
     try {
       // 1. Check software SL/TP first (safety net for failed algo orders)

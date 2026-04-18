@@ -47,6 +47,7 @@ interface SoftOrder {
   entryPrice: number;
   strategy: string;
   openedAt: number;
+  timeoutAt?: number; // ms timestamp; if set and exceeded, force-close at market
 }
 
 // Persisted across cron invocations via module-level variable (same isolate)
@@ -118,7 +119,7 @@ export class TradingEngine {
   }
 
   /**
-   * Main cycle - called by cron every 2 minutes.
+   * Main cycle - called by cron every 5 minutes.
    * 1. Collect news events
    * 2. Process through LLM sensor
    * 3. Event-driven: trade on high-impact news immediately
@@ -221,13 +222,33 @@ export class TradingEngine {
 
       // 4. Process normal items - Llama 4 Scout (free) if available, else Haiku 4.5
       if (normalItems.length > 0) {
+        const batchInput = normalItems.slice(0, 15); // Max 15 per cycle for cost control
         const signals = await processBatch(
           this.wavespeedKey,
-          normalItems.slice(0, 15), // Max 15 per cycle for cost control
+          batchInput,
           this.config.analystModel,
           this.ai // Pass Workers AI binding (Llama 4 Scout) if available
         );
         this.sentimentHistory.push(...signals);
+
+        // Enrich D1 news_events rows with sentiment from LLM (A1.1).
+        // Match signals to input items by index; processBatch preserves order per batch of 5.
+        if (this.experience) {
+          for (let i = 0; i < signals.length && i < batchInput.length; i++) {
+            const s = signals[i];
+            const item = batchInput[i];
+            try {
+              await this.experience.enrichNewsByTitle(
+                item.text,
+                s.asset !== 'MARKET' ? s.asset : undefined,
+                s.sentimentScore,
+                s.confidence,
+                s.magnitude,
+                s.category,
+              );
+            } catch { /* ignore */ }
+          }
+        }
       }
 
       // Also add Fear & Greed as a market-wide signal
@@ -370,6 +391,20 @@ export class TradingEngine {
 
     this.sentimentHistory.push(signal);
 
+    // Enrich the corresponding news_events row with the LLM sentiment (A1.1).
+    if (this.experience) {
+      try {
+        await this.experience.enrichNewsByTitle(
+          item.text,
+          signal.asset !== 'MARKET' ? signal.asset : undefined,
+          signal.sentimentScore,
+          signal.confidence,
+          signal.magnitude,
+          signal.category,
+        );
+      } catch { /* ignore */ }
+    }
+
     // MARKET signals are for general sentiment, not tradeable
     if (signal.asset === 'MARKET') {
       console.log('[Event] General market signal, added to sentiment history only');
@@ -392,7 +427,7 @@ export class TradingEngine {
     const last24hCloses = last24hKlines.map((k: any) => parseFloat(k[4]));
     const last24hVols = last24hKlines.map((k: any) => parseFloat(k[5]));
     const notionalVol24h = last24hCloses.reduce((sum, c, i) => sum + c * last24hVols[i], 0);
-    const MIN_VOLUME_24H = 5_000_000; // $5M minimum
+    const MIN_VOLUME_24H = 2_000_000; // $2M minimum (A1.6: lowered from $5M to widen tradable universe)
     if (notionalVol24h < MIN_VOLUME_24H) {
       console.log(`[Event] ${symbol} 24h volume $${(notionalVol24h / 1e6).toFixed(1)}M below min $${MIN_VOLUME_24H / 1e6}M, skipping`);
       return;
@@ -487,7 +522,8 @@ export class TradingEngine {
           historicalContext ? `\n${historicalContext}` : '',
           '',
           'Analyze this trade setup. The composite score already factors momentum, volatility, trend, and regime.',
-          'REJECT if: composite score < 50, OR momentum + trend both below 40, OR historical context shows repeated losses.',
+          'The composite gate has already filtered out anything below 60.',
+          'REJECT only if historical context shows a clear losing pattern for this asset/direction/regime, or if the news content contradicts the proposed direction.',
           'Respond with JSON: {"execute": true/false, "reasoning": "...", "adjustedSL": number|null, "adjustedTP": number|null, "riskScore": 1-10}',
         ].join('\n');
 
@@ -506,13 +542,11 @@ export class TradingEngine {
           risk?: number;
         };
 
-        const strategistSystemPrompt = `You are an expert crypto trading strategist managing a small account ($60). Rules:
-1. Be VERY conservative - only approve trades with clear edge.
-2. REJECT if historical context shows losing pattern (low win rate, negative avg PnL) for this asset/direction/regime.
-3. In EXTREME_FEAR regime: only approve LONG if confidence >= 0.70 AND magnitude >= 0.7. Prefer SHORT.
-4. In EXTREME_GREED regime: only approve SHORT if confidence >= 0.70 AND magnitude >= 0.7. Prefer LONG.
-5. If the same asset has been traded too recently or has a poor track record, REJECT.
-6. Weight historical data heavily - past losses on this setup should bias towards rejection.
+        const strategistSystemPrompt = `You are an expert crypto trading strategist managing a small account ($60). The composite quality gate (>=60/100) has already filtered the candidate. Rules:
+1. The setup is technically sound. Approve unless news content contradicts the direction or history shows a clear losing pattern.
+2. REJECT if historical context shows repeated losses on this asset/direction/regime (e.g. 0 wins in 3+ trades).
+3. REJECT if the news content is actually neutral/ambiguous despite the LLM score (re-read the headline).
+4. Do NOT add extra confidence/magnitude thresholds — those are already in the gate.
 Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sentences", "riskScore": 1-10, "adjustedSL": number_or_null, "adjustedTP": number_or_null}. No other text.`;
 
         if (!this.ai) throw new Error('No AI binding for strategist');
@@ -633,7 +667,7 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
     // Execute trade
     console.log(`[Event] Executing trade: ${setup.direction} ${symbol}, balance: ${account.availableBalance}`);
     const balance = parseFloat(account.availableBalance);
-    await this.executeTrade(symbol, setup.direction, currentPrice, setup.stopLoss, setup.takeProfit, balance, 'event-driven', signal, composite.sizeMultiplier);
+    await this.executeTrade(symbol, setup.direction, currentPrice, setup.stopLoss, setup.takeProfit, balance, 'event-driven', signal, composite.sizeMultiplier, setup.indicators, setup.timeoutHours);
   }
 
   /**
@@ -685,7 +719,7 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
       magnitude: snap.avgMagnitude,
       direction: snap.compositeScore > 0 ? 'positive' : 'negative',
       source: 'aggregated',
-      category: 'market-neutral',
+      category: 'sentiment_aggregate',
       timestamp: snap.timestamp,
     };
     await this.executeTrade(symbol, direction, currentPrice, filter.stopLoss, filter.takeProfit, balance, 'market-neutral', syntheticSignal);
@@ -704,7 +738,9 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
     balance: number,
     strategy: string,
     signal?: SentimentSignal,
-    compositeMultiplier: number = 1.0
+    compositeMultiplier: number = 1.0,
+    indicators?: { rsi: number; adx: number; atr: number; volumeRatio: number },
+    timeoutHours?: number,
   ): Promise<void> {
     try {
       // Dynamic parameters based on market regime
@@ -865,6 +901,10 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
             sentimentScore: signal?.sentimentScore,
             confidence: signal?.confidence,
             reasoning: signal?.category,
+            rsi: indicators?.rsi,
+            adx: indicators?.adx,
+            atr: indicators?.atr,
+            volumeRatio: indicators?.volumeRatio,
           });
           console.log(`[Experience] Trade recorded: ${direction} ${symbol}`);
         } catch (expErr) {
@@ -874,6 +914,7 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
 
       // Always register soft SL/TP as backup (checked every cron cycle)
       const key = `${symbol}:${direction}`;
+      const openedAt = Date.now();
       softOrders.set(key, {
         symbol,
         direction,
@@ -882,7 +923,8 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
         quantity,
         entryPrice: price,
         strategy,
-        openedAt: Date.now(),
+        openedAt,
+        timeoutAt: timeoutHours ? openedAt + timeoutHours * 3600 * 1000 : undefined,
       });
       if (!slPlaced || !tpPlaced) {
         console.log(`[Trade] Software SL/TP registered for ${key} (SL=$${roundedSL}, TP=$${roundedTP})`);
@@ -903,9 +945,11 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
     // Recover soft orders from D1 if in-memory map is empty (lost after deploy/restart)
     if (softOrders.size === 0 && this.experience) {
       const openTrades = await this.experience.getOpenTrades();
+      const DEFAULT_TIMEOUT_HOURS = 2; // event-driven default
       for (const t of openTrades) {
         if (t.stop_loss && t.take_profit) {
           const key = `${t.symbol}:${t.direction}`;
+          const openedAt = new Date(t.opened_at).getTime();
           softOrders.set(key, {
             symbol: t.symbol,
             direction: t.direction as 'LONG' | 'SHORT',
@@ -914,7 +958,8 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
             quantity: t.quantity,
             entryPrice: t.price,
             strategy: t.strategy,
-            openedAt: new Date(t.opened_at).getTime(),
+            openedAt,
+            timeoutAt: openedAt + DEFAULT_TIMEOUT_HOURS * 3600 * 1000,
           });
         }
       }
@@ -941,12 +986,37 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
       });
 
       if (!pos) {
-        // Position was closed (by Binance algo order or rebalance)
-        // Record close in D1 with pnl=0 (actual pnl unknown since position is gone)
+        // Position was closed externally (algo SL/TP triggered, manual close, etc.).
+        // A1.4: query exchange fills to recover the real PnL instead of recording 0.
+        let realizedPnl = 0;
+        let exitPrice = order.entryPrice;
+        try {
+          const fills = await this.exchange.getUserTrades(order.symbol, 50);
+          // Sum closing fills since openedAt (positionSide matches, opposite side).
+          const closeSide = order.direction === 'LONG' ? 'SELL' : 'BUY';
+          const relevantFills = fills.filter((f: any) =>
+            f.time >= order.openedAt &&
+            f.positionSide === order.direction &&
+            f.side === closeSide
+          );
+          if (relevantFills.length > 0) {
+            realizedPnl = relevantFills.reduce(
+              (sum: number, f: any) => sum + parseFloat(f.realizedPnl || '0') - parseFloat(f.commission || '0'),
+              0,
+            );
+            // Use the volume-weighted exit price for logging accuracy.
+            const totalQty = relevantFills.reduce((s: number, f: any) => s + parseFloat(f.qty || '0'), 0);
+            const totalNotional = relevantFills.reduce((s: number, f: any) => s + parseFloat(f.qty || '0') * parseFloat(f.price || '0'), 0);
+            exitPrice = totalQty > 0 ? totalNotional / totalQty : order.entryPrice;
+          }
+        } catch (fillErr) {
+          console.warn(`[SoftSL/TP] Could not fetch fills for ${order.symbol}: ${(fillErr as Error).message?.slice(0, 80)}`);
+        }
+
         if (this.experience) {
           try {
-            await this.experience.recordTradeClose(order.symbol, order.direction, order.entryPrice, 0);
-            console.log(`[SoftSL/TP] Recorded external close: ${order.symbol} ${order.direction}`);
+            await this.experience.recordTradeClose(order.symbol, order.direction, exitPrice, realizedPnl);
+            console.log(`[SoftSL/TP] Recorded external close: ${order.symbol} ${order.direction} pnl=$${realizedPnl.toFixed(4)}`);
           } catch (e) {
             console.warn(`[SoftSL/TP] Failed to record close: ${(e as Error).message?.slice(0, 80)}`);
           }
@@ -960,7 +1030,12 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
       let shouldClose = false;
       let reason = '';
 
-      if (order.direction === 'LONG') {
+      // Timeout gate (A1.3): force-close after timeoutHours regardless of SL/TP
+      if (order.timeoutAt && Date.now() >= order.timeoutAt) {
+        shouldClose = true;
+        const heldH = (Date.now() - order.openedAt) / 3600000;
+        reason = `Timeout (held ${heldH.toFixed(1)}h, edge decayed)`;
+      } else if (order.direction === 'LONG') {
         if (currentPrice <= order.stopLoss) {
           shouldClose = true;
           reason = `SL hit ($${currentPrice.toFixed(4)} <= $${order.stopLoss.toFixed(4)})`;

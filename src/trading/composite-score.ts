@@ -194,17 +194,16 @@ export function calculateCompositeScore(
     regimeScore * weights.regime
   );
 
-  // Size multiplier based on score
+  // Size multiplier based on score (A1.5: gate raised to 60).
   let sizeMultiplier: number;
   if (score >= 80) sizeMultiplier = 1.0;
   else if (score >= 60) sizeMultiplier = 0.7;
-  else if (score >= 40) sizeMultiplier = 0.4;
   else sizeMultiplier = 0;
 
-  const approved = score >= 40;
+  const approved = score >= 60;
   const reason = approved
     ? `Score ${score}/100 (Sent:${sentimentScore.toFixed(0)} Mom:${momentumScore.toFixed(0)} Vol:${volatilityScore.toFixed(0)} Trend:${trendScore.toFixed(0)} Reg:${regimeScore.toFixed(0)})`
-    : `Score too low: ${score}/100 (min 40)`;
+    : `Score too low: ${score}/100 (min 60)`;
 
   return {
     score,
