@@ -88,6 +88,19 @@ Rules for other fields:
 - category: "event" for things that happened, "rumor" for unconfirmed, "announcement" for official
 - Do NOT predict price from technical analysis - only from NEWS CONTENT`;
 
+const SYSTEM_PROMPT_HIGH = SYSTEM_PROMPT + `
+
+PRICE-AWARE ADJUSTMENTS (when PRICE CONTEXT is provided):
+- If price has ALREADY moved >3% in the news direction over the last 4h, REDUCE magnitude by 0.4 (the move is already priced in).
+- If price is moving OPPOSITE to the news direction (bounce in progress), set sentiment_score closer to 0 (max ±0.3) — the market has rejected the news.
+- If price has moved <1% over 4h despite the news being major, increase confidence by 0.1 (market hasn't reacted yet — fresh edge).
+
+REASONING WORKFLOW (internal thinking before JSON):
+Step 1: Identify the affected asset and base sentiment.
+Step 2: Check PRICE CONTEXT (if provided) — is the news already priced in or freshly breaking?
+Step 3: Apply the price-aware adjustments above.
+Step 4: Output ONLY the final JSON object. Do NOT output your reasoning, only the JSON.`;
+
 /**
  * Resolve LLM output asset name to a Binance-compatible ticker.
  */
@@ -182,20 +195,52 @@ async function processSingleBatch(
 }
 
 /**
+ * Optional multi-timeframe price context for the HIGH-impact sensor.
+ * Helps the LLM detect if the news is already priced in or being rejected by the market.
+ */
+export interface PriceContext {
+  asset: string;
+  current: number;
+  pct5m: number;   // % change vs 5m ago
+  pct1h: number;   // % change vs 1h ago
+  pct4h: number;   // % change vs 4h ago
+  pct24h: number;  // % change vs 24h ago
+  volRatio24h: number; // current 24h volume / average
+}
+
+function formatPriceContext(ctx: PriceContext): string {
+  const fmt = (p: number) => `${p >= 0 ? '+' : ''}${p.toFixed(2)}%`;
+  return [
+    `PRICE CONTEXT for ${ctx.asset}:`,
+    `- Current: $${ctx.current}`,
+    `- 5m change: ${fmt(ctx.pct5m)}`,
+    `- 1h change: ${fmt(ctx.pct1h)}`,
+    `- 4h change: ${fmt(ctx.pct4h)}`,
+    `- 24h change: ${fmt(ctx.pct24h)}`,
+    `- 24h volume: ${ctx.volRatio24h.toFixed(2)}x average`,
+  ].join('\n');
+}
+
+/**
  * Process a single high-impact item via Workers AI (gpt-oss-120b primary,
  * gpt-oss-20b → llama-4-scout fallback). Used for event-driven trades where
  * accuracy matters more than latency.
+ *
+ * If `priceContext` is provided, the LLM will assess whether the news is
+ * already priced in or being rejected by the market.
  */
 export async function processHighImpactItem(
   ai: AiBinding,
   item: RawTextItem,
+  priceContext?: PriceContext,
 ): Promise<SentimentSignal | null> {
-  const prompt = `URGENT crypto news - analyze carefully:\n\n"${item.text}"\n\nSource: ${item.source}\nPublished: ${new Date(item.publishedAt).toISOString()}\n\nReturn JSON:`;
+  const contextBlock = priceContext ? `\n\n${formatPriceContext(priceContext)}\n` : '';
+  const prompt = `URGENT crypto news - analyze carefully:\n\n"${item.text}"\n\nSource: ${item.source}\nPublished: ${new Date(item.publishedAt).toISOString()}${contextBlock}\nReturn JSON:`;
 
   try {
     const result = await callSensorHigh(ai, {
       prompt,
-      systemPrompt: SYSTEM_PROMPT,
+      systemPrompt: SYSTEM_PROMPT_HIGH,
       temperature: 0.1,
       maxTokens: 384,
     });

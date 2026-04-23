@@ -11,7 +11,7 @@
 import type { IExchange, AccountInfo } from '../exchange/types';
 import { TelegramBot } from '../telegram/bot';
 import { collectEvents, classifyImpact } from '../ingestion/collector';
-import { processHighImpactItem, processBatch } from '../sentiment/llm-sensor';
+import { processHighImpactItem, processBatch, PriceContext } from '../sentiment/llm-sensor';
 import { aggregateSignals, rankBySentiment, selectMarketNeutralLegs } from '../sentiment/aggregator';
 import { evaluateEventSignal } from './strategies/event-driven';
 import { shouldExecuteSentimentSignal } from './strategies/market-neutral-filter';
@@ -19,6 +19,7 @@ import { calculatePositionSize } from './risk';
 import { detectRegime, RegimeParams, formatRegimeTelegram } from './regime';
 import { ExperienceDB } from './experience';
 import { calculateCompositeScore } from './composite-score';
+import { calculateRSI, calculateADX, calculateEMA, calculateMACD } from '../utils/indicators';
 import { costTracker, extractJson } from '../wavespeed/client';
 import type { AiBinding } from '../wavespeed/workers-ai';
 import { callStrategist } from '../wavespeed/workers-ai';
@@ -52,6 +53,19 @@ const softOrders: Map<string, SoftOrder> = new Map();
 /** Get current soft order keys for audit */
 export function getSoftOrderKeys(): string[] {
   return [...softOrders.keys()];
+}
+
+/** Drop soft orders for a symbol+direction (used after manual close from Telegram) */
+export function deleteSoftOrdersFor(symbol: string, direction: 'LONG' | 'SHORT'): number {
+  const prefix = `${symbol}:${direction}:`;
+  let n = 0;
+  for (const key of softOrders.keys()) {
+    if (key.startsWith(prefix)) {
+      softOrders.delete(key);
+      n++;
+    }
+  }
+  return n;
 }
 
 export class TradingEngine {
@@ -356,13 +370,152 @@ export class TradingEngine {
   }
 
   /**
+   * Pre-identify the most likely asset from a news item using keyword matching.
+   * Returns the ticker (e.g. "BTC") so we can fetch its price context BEFORE the LLM call.
+   * If no clear asset is found, returns null and the LLM runs without price context.
+   */
+  private quickIdentifyAsset(item: RawTextItem): string | null {
+    if (item.relatedAssets && item.relatedAssets.length > 0) {
+      return item.relatedAssets[0];
+    }
+    const t = item.text.toLowerCase();
+    const map: Array<[string, string]> = [
+      ['bitcoin', 'BTC'], ['btc', 'BTC'],
+      ['ethereum', 'ETH'], ['ether', 'ETH'], [' eth ', 'ETH'],
+      ['solana', 'SOL'], [' sol ', 'SOL'],
+      ['binance coin', 'BNB'], [' bnb ', 'BNB'],
+      ['ripple', 'XRP'], [' xrp ', 'XRP'],
+      ['dogecoin', 'DOGE'], [' doge ', 'DOGE'],
+      ['cardano', 'ADA'], [' ada ', 'ADA'],
+      ['avalanche', 'AVAX'], [' avax ', 'AVAX'],
+      ['polkadot', 'DOT'], [' dot ', 'DOT'],
+      ['chainlink', 'LINK'], [' link ', 'LINK'],
+      ['polygon', 'POL'], [' matic ', 'POL'],
+      ['litecoin', 'LTC'], [' ltc ', 'LTC'],
+      ['toncoin', 'TON'], [' ton ', 'TON'],
+      ['aave', 'AAVE'],
+      ['sui', 'SUI'], ['arbitrum', 'ARB'], ['optimism', 'OP'],
+      ['uniswap', 'UNI'], ['near protocol', 'NEAR'],
+    ];
+    for (const [kw, ticker] of map) {
+      if (t.includes(kw)) return ticker;
+    }
+    return null;
+  }
+
+  /**
+   * Build a PriceContext for the LLM sensor by fetching klines on multiple timeframes.
+   * Returns null if any fetch fails (LLM falls back to text-only mode).
+   */
+  private async buildPriceContext(asset: string): Promise<PriceContext | null> {
+    const symbol = asset + 'USDT';
+    if (!this.exchange.isSymbolAvailable(symbol)) return null;
+    try {
+      // Fetch in parallel: 5m (60 bars = 5h), 1h (24 bars = 1d), no 4h needed (covered by 1h)
+      const [k5m, k1h] = await Promise.all([
+        this.exchange.getKlines(symbol, '5m', 60),
+        this.exchange.getKlines(symbol, '1h', 25),
+      ]);
+      if (!k5m?.length || !k1h?.length) return null;
+
+      const close5m = (idx: number) => parseFloat((k5m[k5m.length - 1 - idx] || [])[4] as any);
+      const close1h = (idx: number) => parseFloat((k1h[k1h.length - 1 - idx] || [])[4] as any);
+      const current = close5m(0);
+      const p5mAgo = close5m(1);
+      const p1hAgo = close5m(12);  // 12 × 5m = 1h
+      const p4hAgo = close1h(4);
+      const p24hAgo = close1h(24);
+
+      const pct = (now: number, then: number) => then > 0 ? ((now - then) / then) * 100 : 0;
+
+      // Volume ratio: last 24h vol / 7-day average (use 1h klines: last 24 vs avg of all 25)
+      const vols = k1h.map((k: any) => parseFloat(k[5]));
+      const last24Vol = vols.slice(-24).reduce((a, b) => a + b, 0);
+      const avgPer24 = vols.reduce((a, b) => a + b, 0) * (24 / vols.length);
+      const volRatio24h = avgPer24 > 0 ? last24Vol / avgPer24 : 1;
+
+      return {
+        asset,
+        current,
+        pct5m: pct(current, p5mAgo),
+        pct1h: pct(current, p1hAgo),
+        pct4h: pct(current, p4hAgo),
+        pct24h: pct(current, p24hAgo),
+        volRatio24h,
+      };
+    } catch (e) {
+      console.warn(`[PriceContext] ${asset} failed: ${(e as Error).message?.slice(0, 60)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Check if the trend has reversed against an open position.
+   * Returns flipped=true if 2 of 3 signals point opposite to the trade direction:
+   *   1. MACD histogram has flipped opposite
+   *   2. RSI has crossed 50 against the trade
+   *   3. Price has crossed EMA20 against the trade
+   * Used by checkSoftOrders to early-exit profitable positions before they decay.
+   */
+  private async checkTrendReversal(
+    symbol: string,
+    direction: 'LONG' | 'SHORT',
+    currentPrice: number,
+  ): Promise<{ flipped: boolean; signals: string }> {
+    try {
+      const klines = await this.exchange.getKlines(symbol, '1h', 30);
+      if (!klines?.length || klines.length < 26) return { flipped: false, signals: 'insufficient-data' };
+
+      const closes = klines.map((k: any) => parseFloat(k[4]));
+      const rsi = calculateRSI(closes);
+      const macd = calculateMACD(closes);
+      const ema20Arr = calculateEMA(closes, 20);
+      const ema20 = ema20Arr[ema20Arr.length - 1];
+
+      const isLong = direction === 'LONG';
+
+      // Signal 1: MACD histogram flipped against us
+      const macdAgainst = isLong ? macd.histogram < 0 : macd.histogram > 0;
+
+      // Signal 2: RSI crossed 50 against us (LONG: RSI<50 = momentum lost; SHORT: RSI>50)
+      const rsiAgainst = isLong ? rsi < 50 : rsi > 50;
+
+      // Signal 3: Price crossed EMA20 against us
+      const priceAgainst = isLong ? currentPrice < ema20 : currentPrice > ema20;
+
+      const flips = [macdAgainst, rsiAgainst, priceAgainst].filter(Boolean).length;
+      const signalNames = [
+        macdAgainst ? 'MACD' : null,
+        rsiAgainst ? 'RSI' : null,
+        priceAgainst ? 'EMA20' : null,
+      ].filter(Boolean).join('+');
+
+      return { flipped: flips >= 2, signals: signalNames || 'none' };
+    } catch (e) {
+      console.warn(`[TrendReversal] ${symbol} check failed: ${(e as Error).message?.slice(0, 60)}`);
+      return { flipped: false, signals: 'error' };
+    }
+  }
+
+  /**
    * Process a high-impact event through the full pipeline.
    */
   private async processEventDriven(item: RawTextItem): Promise<void> {
     console.log(`[Event] Processing: ${item.text.slice(0, 80)}...`);
 
+    // Pre-identify asset to fetch price context before the LLM call (Sprint 1A).
+    const preAsset = this.quickIdentifyAsset(item);
+    let priceContext: PriceContext | null = null;
+    if (preAsset) {
+      priceContext = await this.buildPriceContext(preAsset);
+      if (priceContext) {
+        console.log(`[Event] Price context for ${preAsset}: 5m=${priceContext.pct5m.toFixed(2)}% 1h=${priceContext.pct1h.toFixed(2)}% 4h=${priceContext.pct4h.toFixed(2)}% 24h=${priceContext.pct24h.toFixed(2)}%`);
+      }
+    }
+
     // LLM Sensor: Workers AI gpt-oss-120b → gpt-oss-20b → llama-4-scout (all free).
-    const signal = await processHighImpactItem(this.ai, item);
+    // Pass priceContext so the LLM can detect already-priced-in news vs fresh edge.
+    const signal = await processHighImpactItem(this.ai, item, priceContext ?? undefined);
 
     if (!signal) {
       console.log('[Event] LLM returned no signal');
@@ -399,8 +552,11 @@ export class TradingEngine {
       return;
     }
 
-    // Get kline data for quant filter
-    const klines = await this.exchange.getKlines(symbol, '1h', 48);
+    // Get kline data for quant filter — fetch 1h + 4h in parallel for multi-timeframe analysis (Sprint 1B)
+    const [klines, klines4h] = await Promise.all([
+      this.exchange.getKlines(symbol, '1h', 48),
+      this.exchange.getKlines(symbol, '4h', 48),
+    ]);
 
     // Volume filter: require minimum 24h notional volume ($5M)
     const last24hKlines = klines.slice(-24);
@@ -490,6 +646,41 @@ export class TradingEngine {
           );
         }
 
+        // Multi-timeframe technical analysis (Sprint 1B): compute 1h + 4h indicators
+        // so the strategist can detect timeframe disagreement (= likely bounce trap).
+        const closes4h = klines4h.map((k: any) => parseFloat(k[4]));
+        const highs4h = klines4h.map((k: any) => parseFloat(k[2]));
+        const lows4h = klines4h.map((k: any) => parseFloat(k[3]));
+        const rsi1h = setup.indicators.rsi;
+        const adx1h = setup.indicators.adx;
+        const ema20_1h = calculateEMA(closes, 20);
+        const macd1h = calculateMACD(closes);
+        const trend1h = currentPrice > ema20_1h[ema20_1h.length - 1] ? 'BULLISH' : 'BEARISH';
+
+        const rsi4h = calculateRSI(closes4h);
+        const adx4hRes = calculateADX(highs4h, lows4h, closes4h);
+        const ema20_4h = calculateEMA(closes4h, 20);
+        const macd4h = calculateMACD(closes4h);
+        const last4hPrice = closes4h[closes4h.length - 1];
+        const trend4h = last4hPrice > ema20_4h[ema20_4h.length - 1] ? 'BULLISH' : 'BEARISH';
+
+        // Direction agreement: does the requested trade direction align with each timeframe?
+        const dirBullish = setup.direction === 'LONG';
+        const align1h = (trend1h === 'BULLISH') === dirBullish;
+        const align4h = (trend4h === 'BULLISH') === dirBullish;
+        const alignmentLabel = align1h && align4h
+          ? '✅ FULL ALIGNMENT (1h + 4h confirm)'
+          : align1h !== align4h
+            ? '⚠️ MIXED — timeframes disagree (likely bounce/trap)'
+            : '❌ COUNTER-TREND (both timeframes oppose)';
+
+        const mtfBlock = [
+          'MULTI-TIMEFRAME ANALYSIS:',
+          `- 1H: RSI=${rsi1h.toFixed(0)} ADX=${adx1h.toFixed(0)} MACD=${macd1h.histogram > 0 ? 'bullish' : 'bearish'} Trend=${trend1h} (price ${currentPrice > ema20_1h[ema20_1h.length - 1] ? '>' : '<'} EMA20)`,
+          `- 4H: RSI=${rsi4h.toFixed(0)} ADX=${adx4hRes.adx.toFixed(0)} MACD=${macd4h.histogram > 0 ? 'bullish' : 'bearish'} Trend=${trend4h} (price ${last4hPrice > ema20_4h[ema20_4h.length - 1] ? '>' : '<'} EMA20)`,
+          `- ALIGNMENT for ${setup.direction}: ${alignmentLabel}`,
+        ].join('\n');
+
         const strategistPrompt = [
           `ASSET: ${symbol} @ $${currentPrice.toFixed(4)}`,
           `SIGNAL: ${setup.direction} | Sentiment: ${signal.sentimentScore.toFixed(2)} | Confidence: ${signal.confidence.toFixed(2)} | Magnitude: ${signal.magnitude.toFixed(2)}`,
@@ -497,13 +688,17 @@ export class TradingEngine {
           `SIZE MULTIPLIER: ${composite.sizeMultiplier}x`,
           `QUANT: ATR=$${setup.atr?.toFixed(4) || '?'}`,
           `REGIME: ${this.currentRegime?.regime || 'UNKNOWN'} (F&G: ${this.currentRegime ? 'active' : 'n/a'})`,
+          '',
+          mtfBlock,
+          '',
           `NEWS: "${item.text.slice(0, 300)}"`,
           `PROPOSED SL: $${setup.stopLoss.toFixed(4)} | TP: $${setup.takeProfit.toFixed(4)}`,
           historicalContext ? `\n${historicalContext}` : '',
           '',
           'Analyze this trade setup. The composite score already factors momentum, volatility, trend, and regime.',
           'The composite gate has already filtered out anything below 60.',
-          'REJECT only if historical context shows a clear losing pattern for this asset/direction/regime, or if the news content contradicts the proposed direction.',
+          'REJECT if: (a) MULTI-TIMEFRAME ALIGNMENT is COUNTER-TREND, OR (b) MIXED + composite score < 75 (mixed without strong score = bounce trap), OR (c) historical context shows a losing pattern, OR (d) news content contradicts the direction.',
+          'If MIXED but composite ≥75, you may approve but consider tighter SL.',
           'Respond with JSON: {"execute": true/false, "reasoning": "...", "adjustedSL": number|null, "adjustedTP": number|null, "riskScore": 1-10}',
         ].join('\n');
 
@@ -523,10 +718,13 @@ export class TradingEngine {
         };
 
         const strategistSystemPrompt = `You are an expert crypto trading strategist managing a small account ($60). The composite quality gate (>=60/100) has already filtered the candidate. Rules:
-1. The setup is technically sound. Approve unless news content contradicts the direction or history shows a clear losing pattern.
-2. REJECT if historical context shows repeated losses on this asset/direction/regime (e.g. 0 wins in 3+ trades).
-3. REJECT if the news content is actually neutral/ambiguous despite the LLM score (re-read the headline).
-4. Do NOT add extra confidence/magnitude thresholds — those are already in the gate.
+1. PRIORITY: Multi-timeframe alignment is the strongest filter. If 1H and 4H both oppose the trade direction (COUNTER-TREND), REJECT — you are about to short into an uptrend or long into a downtrend.
+2. If MIXED (1H and 4H disagree) AND composite score is below 75, REJECT — disagreement signals a likely bounce trap.
+3. If MIXED but composite ≥75, you may approve but tighten the SL by 30% (the trade is fragile).
+4. The setup is technically sound. Approve unless news content contradicts the direction or history shows a clear losing pattern.
+5. REJECT if historical context shows repeated losses on this asset/direction/regime (e.g. 0 wins in 3+ trades).
+6. REJECT if the news content is actually neutral/ambiguous despite the LLM score (re-read the headline).
+7. Do NOT add extra confidence/magnitude thresholds — those are already in the gate.
 Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sentences", "riskScore": 1-10, "adjustedSL": number_or_null, "adjustedTP": number_or_null}. No other text.`;
 
         if (!this.ai) throw new Error('No AI binding for strategist');
@@ -535,7 +733,7 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
           prompt: strategistPrompt,
           systemPrompt: strategistSystemPrompt,
           temperature: 0.3,
-          maxTokens: 512,
+          maxTokens: 768, // bumped from 512 — prompt grew with MTF block
         });
 
         console.log(`[Strategist] ${stratResult.model} responded in ${stratResult.inferenceMs}ms`);
@@ -782,12 +980,32 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
         quantity = info.maxQty;
       }
 
-      // Check minimum notional
+      // Bump quantity up to minNotional if we're close (within 30%).
+      // The rounding-down step often pushes us $0.20-$0.50 below the $10 floor;
+      // bumping is safer than skipping a high-conviction trade.
       if (info && quantity * price < info.minNotional) {
-        const msg = `[Trade] ${symbol} notional $${(quantity * price).toFixed(2)} below min $${info.minNotional}, skipping`;
-        console.log(msg);
-        await this.telegram.sendMessage(`⏸ <b>${symbol} ${direction} SKIPPED</b>\nNotional $${(quantity * price).toFixed(2)} below $${info.minNotional} minimum`);
-        return;
+        const targetQty = info.minNotional / price;
+        // Round UP to next step instead of down. We add one step to guarantee >= minNotional.
+        const stepSize = info.stepSize || 0.000001;
+        const bumpedQty = Math.ceil(targetQty / stepSize) * stepSize;
+        const bumpedNotional = bumpedQty * price;
+        const originalNotional = quantity * price;
+
+        // Allow bump if increase is reasonable (<30% over original sizing)
+        const bumpRatio = bumpedNotional / Math.max(originalNotional, 0.01);
+        if (bumpRatio <= 1.3) {
+          console.log(`[Trade] ${symbol} bumping qty ${quantity} → ${bumpedQty} ($${originalNotional.toFixed(2)} → $${bumpedNotional.toFixed(2)}) to meet minNotional`);
+          quantity = this.exchange.roundQuantity(symbol, bumpedQty);
+          // Sanity re-check after re-rounding (some exchanges use truncation)
+          if (quantity * price < info.minNotional) {
+            quantity = bumpedQty; // use unrounded bumped value
+          }
+        } else {
+          const msg = `[Trade] ${symbol} notional $${originalNotional.toFixed(2)} below min $${info.minNotional}, bump=${bumpRatio.toFixed(1)}x too aggressive, skipping`;
+          console.log(msg);
+          await this.telegram.sendMessage(`⏸ <b>${symbol} ${direction} SKIPPED</b>\nNotional $${originalNotional.toFixed(2)} below $${info.minNotional} minimum (bump ${bumpRatio.toFixed(1)}x troppo aggressivo)`);
+          return;
+        }
       }
 
       if (quantity <= 0) {
@@ -1010,26 +1228,43 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
       let shouldClose = false;
       let reason = '';
 
+      // Trend-reversal early-exit (Sprint 1 follow-up):
+      // If position is in profit AND held >60min AND 2/3 trend signals have flipped, close now.
+      // Protects winners from decaying back to break-even at the 4h timeout.
+      const heldMin = (Date.now() - order.openedAt) / 60000;
+      if (pnl > 0 && heldMin >= 60) {
+        const reversal = await this.checkTrendReversal(order.symbol, order.direction, currentPrice);
+        if (reversal.flipped) {
+          shouldClose = true;
+          reason = `Trend reversal (${reversal.signals}, profit $${pnl.toFixed(2)} locked)`;
+        }
+      }
+
       // Timeout gate (A1.3): force-close after timeoutHours regardless of SL/TP
-      if (order.timeoutAt && Date.now() >= order.timeoutAt) {
+      if (!shouldClose && order.timeoutAt && Date.now() >= order.timeoutAt) {
         shouldClose = true;
         const heldH = (Date.now() - order.openedAt) / 3600000;
         reason = `Timeout (held ${heldH.toFixed(1)}h, edge decayed)`;
-      } else if (order.direction === 'LONG') {
-        if (currentPrice <= order.stopLoss) {
-          shouldClose = true;
-          reason = `SL hit ($${currentPrice.toFixed(4)} <= $${order.stopLoss.toFixed(4)})`;
-        } else if (currentPrice >= order.takeProfit) {
-          shouldClose = true;
-          reason = `TP hit ($${currentPrice.toFixed(4)} >= $${order.takeProfit.toFixed(4)})`;
-        }
-      } else {
-        if (currentPrice >= order.stopLoss) {
-          shouldClose = true;
-          reason = `SL hit ($${currentPrice.toFixed(4)} >= $${order.stopLoss.toFixed(4)})`;
-        } else if (currentPrice <= order.takeProfit) {
-          shouldClose = true;
-          reason = `TP hit ($${currentPrice.toFixed(4)} <= $${order.takeProfit.toFixed(4)})`;
+      }
+
+      // SL/TP checks (only if not already closing for trend-reversal or timeout)
+      if (!shouldClose) {
+        if (order.direction === 'LONG') {
+          if (currentPrice <= order.stopLoss) {
+            shouldClose = true;
+            reason = `SL hit ($${currentPrice.toFixed(4)} <= $${order.stopLoss.toFixed(4)})`;
+          } else if (currentPrice >= order.takeProfit) {
+            shouldClose = true;
+            reason = `TP hit ($${currentPrice.toFixed(4)} >= $${order.takeProfit.toFixed(4)})`;
+          }
+        } else {
+          if (currentPrice >= order.stopLoss) {
+            shouldClose = true;
+            reason = `SL hit ($${currentPrice.toFixed(4)} >= $${order.stopLoss.toFixed(4)})`;
+          } else if (currentPrice <= order.takeProfit) {
+            shouldClose = true;
+            reason = `TP hit ($${currentPrice.toFixed(4)} <= $${order.takeProfit.toFixed(4)})`;
+          }
         }
       }
 

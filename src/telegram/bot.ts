@@ -134,6 +134,7 @@ export class TelegramBot {
           { command: 'audit', description: 'System health check' },
           { command: 'costs', description: 'LLM costs & net P&L' },
           { command: 'exp', description: 'Experience database stats' },
+          { command: 'close', description: 'Close a position: /close BTC' },
           { command: 'help', description: 'All commands' },
         ],
       }),
@@ -149,7 +150,9 @@ export class TelegramBot {
     const text = update.message?.text?.trim();
     if (!text) return null;
 
-    const command = text.toLowerCase().split(' ')[0];
-    return command; // Return the command for the caller to handle
+    const parts = text.trim().split(/\s+/);
+    const command = parts[0].toLowerCase();
+    const args = parts.slice(1).join(' ').trim();
+    return args ? `${command} ${args}` : command;
   }
 }

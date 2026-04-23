@@ -8,7 +8,7 @@
 
 import { Hono } from 'hono';
 import { TelegramBot, TelegramUpdate } from './telegram/bot';
-import { TradingEngine, EngineConfig, getSoftOrderKeys } from './trading/engine';
+import { TradingEngine, EngineConfig, getSoftOrderKeys, deleteSoftOrdersFor } from './trading/engine';
 import { runAudit, formatAuditTelegram, formatAuditAlert } from './trading/audit';
 import { createExchange } from './exchange/factory';
 import type { IExchange } from './exchange/types';
@@ -108,10 +108,14 @@ app.post('/webhook/telegram/:secret', async (c) => {
     return c.json({ error: 'Invalid payload' }, 400);
   }
 
-  const command = await telegram.handleUpdate(update, c.env.TELEGRAM_CHAT_ID);
-  if (!command) {
+  const fullInput = await telegram.handleUpdate(update, c.env.TELEGRAM_CHAT_ID);
+  if (!fullInput) {
     return c.json({ ok: true }); // Ignore unauthorized or empty messages
   }
+
+  // Split command from args. e.g. "/close BTC" -> command="/close", args="BTC"
+  const [command, ...argParts] = fullInput.split(/\s+/);
+  const args = argParts.join(' ').trim();
 
   try {
     switch (command) {
@@ -311,6 +315,67 @@ app.post('/webhook/telegram/:secret', async (c) => {
         break;
       }
 
+      case '/close': {
+        // Manual close of a specific position. Usage: /close BTC  or  /close BTCUSDT
+        if (!args) {
+          await telegram.sendMessage(
+            '⚠️ Uso: <code>/close SYMBOL</code>\nEs: <code>/close BTC</code> o <code>/close BTCUSDT</code>'
+          );
+          break;
+        }
+
+        const raw = args.toUpperCase().replace(/[^A-Z0-9]/g, '');
+        const target = raw.endsWith('USDT') ? raw : `${raw}USDT`;
+
+        const binance = createExchange(c.env);
+        const positions = await binance.getPositionRisk();
+        const matches = positions.filter((p: any) => p.symbol === target && parseFloat(p.positionAmt) !== 0);
+
+        if (matches.length === 0) {
+          await telegram.sendMessage(`⚠️ Nessuna posizione aperta su <b>${target}</b>`);
+          break;
+        }
+
+        let resultMsg = `🧹 <b>Chiusura ${target}</b>\n\n`;
+        for (const p of matches) {
+          const amt = parseFloat(p.positionAmt);
+          const direction = amt > 0 ? 'LONG' : 'SHORT';
+          const closeSide = amt > 0 ? 'SELL' : 'BUY';
+          const qty = Math.abs(amt);
+          const entry = parseFloat(p.entryPrice);
+          const mark = parseFloat(p.markPrice);
+          const unrealizedPnl = parseFloat((p as any).unRealizedProfit || (p as any).unrealizedProfit || '0');
+
+          try {
+            await binance.newOrder({
+              symbol: target,
+              side: closeSide,
+              positionSide: direction,
+              type: 'MARKET',
+              quantity: qty,
+            });
+
+            resultMsg += `✅ ${direction} ${target}\n`;
+            resultMsg += `  Entry: $${entry} → Mark: $${mark}\n`;
+            resultMsg += `  P&L: ${unrealizedPnl >= 0 ? '+' : ''}$${unrealizedPnl.toFixed(2)}\n\n`;
+
+            // Cancel any soft-orders (SL/TP) for this symbol+direction
+            deleteSoftOrdersFor(target, direction);
+
+            // Update D1
+            if (c.env.DB) {
+              const expDb = new ExperienceDB(c.env.DB);
+              await expDb.recordTradeClose(target, direction, mark, unrealizedPnl);
+            }
+          } catch (e) {
+            resultMsg += `❌ ${direction} ${target}: ${(e as Error).message?.slice(0, 100)}\n\n`;
+          }
+        }
+
+        await telegram.sendMessage(resultMsg);
+        break;
+      }
+
       case '/closeold': {
         // One-time command: close old positions without SL/TP and clean D1
         const binance = createExchange(c.env);
@@ -382,6 +447,7 @@ app.post('/webhook/telegram/:secret', async (c) => {
           `/costs - Costi LLM & P&L netto\n` +
           `/exp - Experience database stats\n` +
           `/audit - System health check\n` +
+          `/close SYMBOL - Chiudi una posizione (es: /close BTC)\n` +
           `/stop - Stop info\n` +
           `/help - This message`;
         await telegram.sendMessage(msg);
