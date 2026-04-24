@@ -14,16 +14,20 @@ ARIA monitors crypto news in real-time, classifies events through a pipeline of 
 
 ## Features
 
-- **Multi-LLM Pipeline** -- Llama 4 Scout for batch classification, Kimi K2 for strategic trade reasoning, Claude for deep analysis
+- **Multi-LLM Pipeline** -- GPT-OSS 120B/20B and Llama 4 Scout running on Cloudflare Workers AI for batch classification, high-impact sentiment, and strategic trade reasoning
+- **Multi-Timeframe Analysis** -- Strategist evaluates 1h + 4h indicators in parallel and rejects trades when timeframes disagree (counter-trend / bounce traps)
+- **Price-Aware Sensor** -- High-impact news classifier receives multi-timeframe price snapshot (5m/1h/4h/24h + volume) and adjusts sentiment when news is already priced in
 - **Multi-Exchange Support** -- Hyperliquid (primary) and Binance Futures, with a pluggable exchange interface
-- **Event-Driven Trading** -- Detects breaking news, analyzes sentiment, and trades within seconds
-- **Market-Neutral Strategy** -- Maintains balanced long/short exposure to reduce directional risk
+- **Event-Driven Trading** -- Detects breaking news from RSS, CryptoCompare, Reddit and Binance announcements, classifies via LLM, and trades within seconds
+- **Trend-Reversal Early-Exit** -- Profitable positions held >60 min are closed automatically when 2 of 3 trend signals (MACD/RSI/EMA20) flip against them
+- **RSI Momentum Gates** -- Anti-bounce filter blocks SHORT on oversold RSI<45, pro-momentum filter blocks LONG on falling-knife RSI<45
+- **Asymmetric Regime Filter** -- Blocks SHORT in EXTREME_FEAR (F&G<35) where statistical edge favors LONG
 - **Dynamic Market Regime Detection** -- Adapts leverage, position sizing, and bias across 5 market regimes
-- **Experience Database** -- Self-learning system that records trades, tracks patterns, and feeds historical context back to the LLM
+- **Experience Database** -- Self-learning D1 store that records trades, tracks patterns, and feeds historical context back to the LLM
 - **Automated Audit System** -- Detects ghost trades, orphaned positions, missing SL/TP, and balance anomalies
-- **Telegram Control Interface** -- Real-time notifications and interactive commands from your phone
+- **Telegram Control Interface** -- Real-time notifications, performance reports, and `/close SYMBOL` for manual position closure
 - **Zero Hosting Cost** -- Runs entirely on Cloudflare Workers free tier, with free LLM inference via Workers AI
-- **Risk Management** -- Dynamic leverage (2x-15x), ATR-based stop-loss/take-profit, position sizing, and software SL/TP safety net
+- **Risk Management** -- Dynamic leverage (2x-15x), ATR-based SL/TP (1.5x SL, 1.8x TP), 4h timeout, position sizing, and software SL/TP safety net
 
 ## Architecture
 
@@ -31,11 +35,12 @@ ARIA monitors crypto news in real-time, classifies events through a pipeline of 
                               ARIA Trading Pipeline
   ┌─────────────────────────────────────────────────────────────────────┐
   │                                                                     │
-  │   ┌──────────────┐     ┌───────────────┐     ┌──────────────────┐  │
-  │   │  News Sources │     │  Fear & Greed  │     │  Exchange Market │  │
-  │   │  (CryptoPanic,│     │    Index       │     │   Data (OHLCV)  │  │
-  │   │   RSS feeds)  │     └───────┬───────┘     └────────┬─────────┘  │
-  │   └──────┬───────┘             │                       │            │
+  │   ┌──────────────────┐ ┌───────────────┐  ┌────────────────────┐  │
+  │   │  News Sources    │ │ Fear & Greed  │  │  Exchange Market   │  │
+  │   │ (CryptoCompare,  │ │    Index      │  │   Data (1h + 4h    │  │
+  │   │  RSS, Reddit,    │ └───────┬───────┘  │    OHLCV klines)   │  │
+  │   │  Binance Ann.)   │         │          └────────┬───────────┘  │
+  │   └──────┬───────────┘         │                   │              │
   │          │                     │                       │            │
   │          ▼                     ▼                       │            │
   │   ┌──────────────────────────────────┐                 │            │
@@ -47,9 +52,9 @@ ARIA monitors crypto news in real-time, classifies events through a pipeline of 
   │          │              │                              │            │
   │          ▼              ▼                              │            │
   │   ┌────────────┐ ┌─────────────┐                      │            │
-  │   │  Claude    │ │ Llama 4     │                      │            │
-  │   │  Sonnet 4.5│ │ Scout 17B   │     LLM Sensor       │            │
-  │   │ (WaveSpeed)│ │ (Workers AI)│     Layer             │            │
+  │   │ GPT-OSS    │ │ Llama 4     │                      │            │
+  │   │ 120B + MTF │ │ Scout 17B   │     LLM Sensor       │            │
+  │   │ price ctx  │ │ (batch)     │     (Workers AI)      │            │
   │   └─────┬──────┘ └──────┬──────┘                      │            │
   │         │               │                              │            │
   │         ▼               ▼                              │            │
@@ -61,9 +66,10 @@ ARIA monitors crypto news in real-time, classifies events through a pipeline of 
   │                  ▼                                     │            │
   │   ┌──────────────────────────────────┐                 │            │
   │   │      Quantitative Filter         │◄────────────────┘            │
-  │   │  RSI, ADX, ATR, Volume, EMA      │                             │
-  │   │  + Market Regime Detection       │                             │
-  │   │  + Min $5M 24h Volume Filter     │                             │
+  │   │  RSI gates (≥45 both dirs)       │                             │
+  │   │  Anti-bounce volume filter       │                             │
+  │   │  F&G asymmetric block (SHORT)    │                             │
+  │   │  Min $2M 24h volume              │                             │
   │   └──────────────┬───────────────────┘                             │
   │                  │                                                  │
   │                  ▼                                                  │
@@ -73,19 +79,20 @@ ARIA monitors crypto news in real-time, classifies events through a pipeline of 
   │   │  Volatility 20% | Trend 15%     │                             │
   │   │  Regime 15%  → size scaling     │                             │
   │   └──────────────┬───────────────────┘                             │
-  │                  │ (score >= 40)                                    │
+  │                  │ (score >= 60)                                    │
   │                  ▼                                                  │
   │   ┌──────────────────────────────────┐    ┌───────────────────┐    │
-  │   │     Kimi K2.5 Strategist         │◄───│  Experience DB    │    │
-  │   │  (approve/reject + adjust SL/TP) │    │  (D1 - patterns,  │    │
-  │   │  FREE on Workers AI              │    │   trade history)  │    │
+  │   │     GPT-OSS 120B Strategist      │◄───│  Experience DB    │    │
+  │   │  Multi-timeframe 1h+4h alignment │    │  (D1 - patterns,  │    │
+  │   │  Reject COUNTER-TREND / MIXED    │    │   trade history)  │    │
   │   └──────────────┬───────────────────┘    └───────────────────┘    │
   │                  │                                                  │
   │                  ▼                                                  │
   │   ┌──────────────────────────────────┐    ┌───────────────────┐    │
   │   │    Risk Manager & Executor       │───►│  Hyperliquid      │    │
   │   │  (position sizing, leverage,     │    │  (perps, mainnet) │    │
-  │   │   SL/TP orders, max positions)   │    └───────────────────┘    │
+  │   │   4h timeout, trend-reversal     │    └───────────────────┘    │
+  │   │   early-exit, soft SL/TP)        │                             │
   │   └──────────────┬───────────────────┘                             │
   │                  │                                                  │
   │                  ▼                                                  │
@@ -101,17 +108,16 @@ ARIA monitors crypto news in real-time, classifies events through a pipeline of 
 
 ## Multi-LLM Pipeline
 
-ARIA uses a tiered LLM architecture where each model has a specific role, optimized for cost and latency.
+ARIA uses a tiered LLM architecture where each model has a specific role, optimized for latency and JSON reliability. All models run on Cloudflare Workers AI with automatic fallback chains.
 
-| Role | Model | Provider | Cost | When |
-|---|---|---|---|---|
-| Batch Classifier | Llama 4 Scout 17B | Cloudflare Workers AI | $0 (free tier) | Every 5 min -- classifies all normal news items |
-| High-Impact Analyst | Claude Sonnet 4.5 | WaveSpeed | ~$0.002/call | On breaking news -- deep sentiment analysis |
-| Strategist | Kimi K2.5 | Cloudflare Workers AI | $0 (free tier) | On strong signals -- trade approval/rejection |
-| Fallback | Claude Haiku 4.5 | WaveSpeed | ~$0.001/call | Only if primary providers are down |
-| Executor | TypeScript Engine | Cloudflare Workers | $0 | Always -- risk management, order execution |
+| Role | Primary Model | Fallback Chain | When |
+|---|---|---|---|
+| Batch Classifier | Llama 4 Scout 17B | GPT-OSS 20B | Every 5 min -- classifies normal news in 5-item batches |
+| High-Impact Sensor | GPT-OSS 120B | GPT-OSS 20B → Llama 4 Scout | On breaking news -- single-item analysis with multi-timeframe price context |
+| Strategist | GPT-OSS 120B | GPT-OSS 20B → Llama 4 Scout | On strong signals -- final approval/rejection with 1h+4h indicators and historical patterns |
+| Executor | TypeScript Engine | -- | Always -- quant filters, risk management, order execution |
 
-The LLM layer acts purely as a **sensor** -- it classifies and extracts structured data from news. It never decides to buy or sell. All trading decisions go through the quantitative filter, composite scoring, strategist validation, and risk management engine.
+All LLM inference is **free** on the Cloudflare Workers AI free tier. The LLM layer acts purely as a **sensor and strategist** -- it classifies news and validates setups but never decides direction blindly. All trading decisions go through quant filters (RSI gates, anti-bounce, F&G regime), composite scoring, multi-timeframe alignment check, and risk management.
 
 ## Supported Exchanges
 
@@ -152,10 +158,9 @@ Every trade candidate is scored 0-100 across five dimensions before reaching the
 |---|---|---|
 | 80-100 | Strong setup -- full size | 1.0x |
 | 60-79 | Decent setup -- reduced size | 0.7x |
-| 40-59 | Weak setup -- minimal size | 0.4x |
-| 0-39 | Poor setup -- trade rejected | 0x |
+| 0-59 | Trade rejected | 0x |
 
-The composite score is passed to the strategist LLM alongside historical context, giving it quantitative backing for its approval/rejection decision.
+The composite score is passed to the strategist LLM alongside multi-timeframe indicators (1h + 4h RSI/ADX/MACD/EMA20) and historical context, giving it quantitative backing for its approval/rejection decision. The strategist rejects outright when 1h and 4h timeframes are counter-trend.
 
 ## Telegram Commands
 
@@ -167,6 +172,7 @@ The composite score is passed to the strategist LLM alongside historical context
 | `/costs` | LLM cost breakdown, trading P&L, and net monthly projection |
 | `/exp` | Experience database stats: trades, patterns learned, news accuracy |
 | `/audit` | Run manual health check: ghost trades, missing SL/TP, balance anomalies |
+| `/close SYMBOL` | Manually close a position (e.g. `/close BTC` or `/close BTCUSDT`) |
 | `/help` | List all available commands |
 
 ## Quick Start
@@ -214,13 +220,12 @@ npx wrangler secret put HL_PRIVATE_KEY
 npx wrangler secret put TELEGRAM_BOT_TOKEN
 npx wrangler secret put TELEGRAM_CHAT_ID
 
-# WaveSpeed API key (for Claude high-impact analysis)
-npx wrangler secret put WAVESPEED_API_KEY
-
 # Optional: Binance Futures (if using Binance instead of Hyperliquid)
 # npx wrangler secret put BINANCE_API_KEY
 # npx wrangler secret put BINANCE_API_SECRET
 ```
+
+All LLM inference runs on the Cloudflare Workers AI binding (`env.AI`) -- no external LLM API keys are required.
 
 ### 4. Configure Exchange
 
@@ -270,13 +275,27 @@ Trading parameters are defined in `src/index.ts` within the `EngineConfig`:
 
 | Parameter | Hyperliquid | Binance | Description |
 |---|---|---|---|
-| `symbols` | 14 pairs | 10 pairs | Watchlist for market-neutral strategy |
 | `leverage` | 3x | 10x | Base leverage (regime adjusts dynamically) |
 | `riskPerTrade` | 2% | 2% | Base risk per trade as % of balance |
 | `maxPositionSizeUsdt` | $15 | $500 | Maximum notional value per position |
 | `maxPositions` | 3 | 6 | Maximum simultaneous open positions |
 | `enableEventDriven` | true | true | Enable event-driven trading on breaking news |
 | `enableMarketNeutral` | false | true | Enable market-neutral rebalancing |
+
+Strategy gates and timeouts are tuned in [src/trading/strategies/event-driven.ts](src/trading/strategies/event-driven.ts) and [src/trading/engine.ts](src/trading/engine.ts):
+
+| Gate | Value | Source |
+|---|---|---|
+| Anti-bounce SHORT | RSI ≥ 45 required | event-driven.ts |
+| Pro-momentum LONG | RSI ≥ 45 required | event-driven.ts |
+| Anti-bounce SHORT volume | volume ratio ≥ 0.5 required | event-driven.ts |
+| F&G SHORT block | reject SHORT if F&G < 35 | engine.ts |
+| Min 24h notional volume | $2M | engine.ts |
+| Loss cooldown | 1h same asset | engine.ts |
+| Holding timeout | 4h | event-driven.ts |
+| SL multiplier | 1.5x ATR | event-driven.ts |
+| TP multiplier | 1.8x ATR | event-driven.ts |
+| Trend-reversal early-exit | 2 of 3 signals (MACD/RSI/EMA20) flipped, in profit, held ≥60 min | engine.ts |
 
 ## Project Structure
 
@@ -295,13 +314,13 @@ aria-trading/
 │   │   └── auth.ts                       # EIP-712 signing for L1 actions
 │   ├── ingestion/
 │   │   ├── collector.ts                  # News event collector + impact classifier
-│   │   └── sources.ts                    # News source definitions (CryptoPanic, RSS)
+│   │   └── sources.ts                    # News sources (CryptoCompare, Reddit, RSS, Binance)
 │   ├── sentiment/
-│   │   ├── llm-sensor.ts                # LLM-based sentiment extraction
+│   │   ├── llm-sensor.ts                # LLM sentiment extraction + price-aware HIGH sensor
 │   │   ├── aggregator.ts                # Signal aggregation + ranking
 │   │   └── types.ts                     # Sentiment type definitions
 │   ├── trading/
-│   │   ├── engine.ts                     # Main trading engine (pipeline orchestrator)
+│   │   ├── engine.ts                     # Main trading engine (orchestrator, MTF, trend-reversal)
 │   │   ├── composite-score.ts           # Multi-factor trade quality scoring (0-100)
 │   │   ├── regime.ts                     # Market regime detector (5 regimes)
 │   │   ├── experience.ts                # Experience database (D1-backed learning)
@@ -310,23 +329,24 @@ aria-trading/
 │   │   ├── risk.ts                       # Position sizing calculator
 │   │   ├── signals.ts                    # Signal type definitions
 │   │   └── strategies/
-│   │       ├── event-driven.ts           # Event-driven strategy logic
+│   │       ├── event-driven.ts           # Event-driven strategy + RSI/anti-bounce gates
 │   │       └── market-neutral-filter.ts  # Quantitative filter (RSI, ADX, ATR, volume)
 │   ├── telegram/
 │   │   └── bot.ts                        # Telegram notifications + command handler
 │   ├── utils/
 │   │   └── indicators.ts                # Technical indicators (RSI, EMA, MACD, BB, ADX, ATR)
 │   └── wavespeed/
-│       ├── client.ts                     # WaveSpeed LLM gateway + cost tracker
-│       ├── nvidia.ts                     # NVIDIA NIM client (legacy, unused)
-│       └── workers-ai.ts                # Workers AI client (Llama 4 Scout + Kimi K2.5)
+│       ├── client.ts                     # Cost tracker + JSON extraction utilities
+│       └── workers-ai.ts                 # Workers AI client (GPT-OSS, Llama 4 Scout fallback chains)
+├── docs/                                 # Analysis docs and tuning playbooks
 ├── tests/                                # Test suite (Vitest)
 ├── schema.sql                            # D1 database schema
-├── wrangler.toml                         # Cloudflare Workers configuration
 ├── package.json
 ├── tsconfig.json
 └── vitest.config.ts
 ```
+
+> **Note**: `wrangler.toml` is gitignored — copy `wrangler.toml.example` (if present) or create your own with KV/D1/AI bindings. See the Quick Start section.
 
 ## Security
 
@@ -341,8 +361,21 @@ aria-trading/
 
 ## Roadmap
 
+Completed:
 - [x] News deduplication in D1 to prevent trading on repeated events
 - [x] Composite scoring system (multi-factor trade quality gate)
+- [x] All LLM inference migrated to Workers AI (no external paid APIs)
+- [x] Multi-timeframe analysis (1h + 4h) for strategist decision
+- [x] Price-aware sensor with multi-timeframe price snapshot context
+- [x] Trend-reversal early-exit for profitable positions
+- [x] RSI momentum gates (anti-bounce SHORT, pro-momentum LONG)
+- [x] Asymmetric F&G regime filter (block SHORT in EXTREME_FEAR)
+- [x] Manual `/close SYMBOL` command from Telegram
+
+Planned:
+- [ ] Semantic news deduplication + aging (multi-source same story)
+- [ ] Divergence detector (RSI vs price exhaustion signals)
+- [ ] Strategist binary checklist (replace freeform reasoning)
 - [ ] Twitter/X bot for trade transparency and social sentiment ingestion
 - [ ] Kelly Criterion position sizing based on historical win/loss statistics
 - [ ] Web dashboard (Cloudflare Pages)
