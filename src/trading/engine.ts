@@ -1254,6 +1254,32 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
             console.warn(`[SoftSL/TP] Failed to record close: ${(e as Error).message?.slice(0, 80)}`);
           }
         }
+
+        // Notify Telegram so the close leaves a trace (was previously silent).
+        // Infer the close reason: SL hit if exit moved against us, TP hit if in our favor.
+        const heldH = (Date.now() - order.openedAt) / 3600000;
+        const movedAgainst = order.direction === 'LONG'
+          ? exitPrice <= order.stopLoss
+          : exitPrice >= order.stopLoss;
+        const movedFavor = order.direction === 'LONG'
+          ? exitPrice >= order.takeProfit
+          : exitPrice <= order.takeProfit;
+        const inferredReason = movedAgainst
+          ? `Algo SL hit (exchange-side)`
+          : movedFavor
+            ? `Algo TP hit (exchange-side)`
+            : `External close (manual or algo)`;
+
+        await this.telegram.sendMessage(
+          `${realizedPnl >= 0 ? '✅' : '🛑'} <b>${order.symbol} ${order.direction} CLOSED</b>\n\n` +
+          `<b>Reason:</b> ${inferredReason}\n` +
+          `<b>Entry:</b> <code>$${order.entryPrice.toFixed(4)}</code>\n` +
+          `<b>Exit:</b> <code>$${exitPrice.toFixed(4)}</code>\n` +
+          `<b>P&L:</b> <code>${realizedPnl >= 0 ? '+' : ''}$${realizedPnl.toFixed(2)}</code>\n` +
+          `<b>Held:</b> ${heldH.toFixed(1)}h\n` +
+          `<b>Strategy:</b> ${order.strategy}`
+        );
+
         softOrders.delete(key);
         continue;
       }
@@ -1352,12 +1378,14 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
             }
           }
 
+          const closeHeldH = (Date.now() - order.openedAt) / 3600000;
           await this.telegram.sendMessage(
             `${pnl >= 0 ? '✅' : '🛑'} <b>${order.symbol} ${order.direction} CLOSED</b>\n\n` +
             `<b>Reason:</b> ${reason}\n` +
             `<b>Entry:</b> <code>$${order.entryPrice.toFixed(4)}</code>\n` +
             `<b>Exit:</b> <code>$${currentPrice.toFixed(4)}</code>\n` +
             `<b>P&L:</b> <code>${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</code>\n` +
+            `<b>Held:</b> ${closeHeldH.toFixed(1)}h\n` +
             `<b>Strategy:</b> ${order.strategy}`
           );
 
