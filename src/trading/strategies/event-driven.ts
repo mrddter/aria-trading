@@ -7,9 +7,11 @@
  * 1. Only trade HIGH magnitude events (>0.6)
  * 2. LLM must have HIGH confidence (>0.7)
  * 3. Quant filter must confirm (RSI not extreme, volume spiking, price not already moved)
- * 4. Anti-bounce: block SHORT if RSI<35 (oversold) or vol<0.5 (no panic-sell) — short-squeeze trap
- * 5. Execute within 60 seconds of event detection
- * 6. Tight SL (1.5x ATR), moderate TP (2.5x ATR) - quick profit target
+ * 4. RSI momentum gate (Sprint 2A): SHORT requires RSI≥45 (no oversold bounce trap),
+ *    LONG requires RSI≥45 (no falling-knife catch). Both directions need confirming momentum.
+ * 5. Anti-bounce: block SHORT if vol<0.5 (no panic-sell)
+ * 6. Execute within 60 seconds of event detection
+ * 7. Tight SL (1.5x ATR), TP 1.8x ATR — realistic for 4h holding
  */
 
 import { SentimentSignal } from '../../sentiment/types';
@@ -100,11 +102,15 @@ export function evaluateEventSignal(
     }
   }
 
-  // --- Gate 6: Anti-bounce-trap for SHORT ---
-  // Bearish news on already-oversold assets with no panic-selling volume
-  // is a classic short-squeeze setup. RSI<35 = ipervenduto, vol<0.5 = nessun panico.
-  if (direction === 'SHORT' && rsi < 35) {
-    return reject(symbol, `Anti-bounce: SHORT blocked, RSI=${rsi.toFixed(0)} oversold`, indicators);
+  // --- Gate 6: RSI direction-momentum gate (Sprint 2A) ---
+  // Data 2026-04-19→24 (58 trade): SHORT con RSI 35-45 = WR 33% / -$0.65 (15 trade).
+  //                                LONG  con RSI 35-45 = WR 0%  / -$0.20 (2 trade).
+  // Estendo anti-bounce SHORT: RSI<45 → block. Aggiungo pro-momentum LONG: RSI<45 → block.
+  if (direction === 'SHORT' && rsi < 45) {
+    return reject(symbol, `Anti-bounce: SHORT blocked, RSI=${rsi.toFixed(0)} (need ≥45 for clean downtrend)`, indicators);
+  }
+  if (direction === 'LONG' && rsi < 45) {
+    return reject(symbol, `Pro-momentum: LONG blocked, RSI=${rsi.toFixed(0)} (need ≥45 for trend confirmation)`, indicators);
   }
   if (direction === 'SHORT' && volumeRatio < 0.5) {
     return reject(symbol, `Anti-bounce: SHORT blocked, vol=${volumeRatio.toFixed(2)}x (no panic-sell)`, indicators);

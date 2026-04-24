@@ -8,7 +8,7 @@
 
 import { Hono } from 'hono';
 import { TelegramBot, TelegramUpdate } from './telegram/bot';
-import { TradingEngine, EngineConfig, getSoftOrderKeys, deleteSoftOrdersFor } from './trading/engine';
+import { TradingEngine, EngineConfig, getSoftOrderKeys, deleteSoftOrdersFor, getReversalChecks } from './trading/engine';
 import { runAudit, formatAuditTelegram, formatAuditAlert } from './trading/audit';
 import { createExchange } from './exchange/factory';
 import type { IExchange } from './exchange/types';
@@ -88,6 +88,27 @@ app.get('/account', async (c) => {
   } catch (err) {
     return c.json({ error: (err as Error).message }, 500);
   }
+});
+
+// Trend-reversal telemetry — see if/when the early-exit gate is firing.
+// Resets on deploy. Returns last 50 checks (both flipped=true and false).
+app.get('/debug/reversals', (c) => {
+  const checks = getReversalChecks();
+  const flipped = checks.filter(r => r.flipped);
+  return c.json({
+    total_checks: checks.length,
+    total_flipped: flipped.length,
+    open_positions_in_profit_held_60min: 'visible only when checked',
+    last_checks: checks.slice(-20).reverse().map(r => ({
+      symbol: r.symbol,
+      direction: r.direction,
+      pnl: r.pnl.toFixed(4),
+      held_min: r.heldMin.toFixed(0),
+      signals: r.signals,
+      flipped: r.flipped,
+      ts: new Date(r.ts).toISOString(),
+    })),
+  });
 });
 
 // Telegram webhook handler - interactive commands

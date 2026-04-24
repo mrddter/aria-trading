@@ -50,6 +50,24 @@ interface SoftOrder {
 // Persisted across cron invocations via module-level variable (same isolate)
 const softOrders: Map<string, SoftOrder> = new Map();
 
+// Trend-reversal telemetry: persists across cron invocations within same isolate.
+// Cleared on deploy. Useful to verify the early-exit logic is firing.
+interface ReversalCheck {
+  symbol: string;
+  direction: 'LONG' | 'SHORT';
+  pnl: number;
+  heldMin: number;
+  signals: string;
+  flipped: boolean;
+  ts: number;
+}
+const reversalChecks: ReversalCheck[] = [];
+const MAX_REVERSAL_HISTORY = 50;
+
+export function getReversalChecks(): ReversalCheck[] {
+  return [...reversalChecks];
+}
+
 /** Get current soft order keys for audit */
 export function getSoftOrderKeys(): string[] {
   return [...softOrders.keys()];
@@ -609,6 +627,23 @@ export class TradingEngine {
       return;
     }
 
+    // ---- F&G ASYMMETRIC GATE (Sprint 2A) ----
+    // Data 2026-04-19→24: in EXTREME_FEAR (F&G<35) i LONG vincono 80%, gli SHORT solo 50%
+    // con loss avg 4x il win avg. Il regime adjusta size ma non blocca direzione.
+    // Blocca SHORT in F&G<35 (lascia LONG passare).
+    if (setup.direction === 'SHORT' && this.lastFearGreed < 35) {
+      const reason = `SHORT blocked in EXTREME_FEAR (F&G=${this.lastFearGreed}, LONG-favored regime)`;
+      console.log(`[Event] ${reason}`);
+      await this.telegram.notifyEvent({
+        asset: signal.asset,
+        sentiment: signal.sentimentScore,
+        magnitude: signal.magnitude,
+        headline: item.text.slice(0, 200),
+        action: `SKIP: ${reason}`,
+      });
+      return;
+    }
+
     // ---- COMPOSITE SCORE (multi-factor quality gate) ----
     const composite = calculateCompositeScore(
       signal, highs, lows, closes, volumes,
@@ -1143,7 +1178,7 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
     // Recover soft orders from D1 if in-memory map is empty (lost after deploy/restart)
     if (softOrders.size === 0 && this.experience) {
       const openTrades = await this.experience.getOpenTrades();
-      const DEFAULT_TIMEOUT_HOURS = 2; // event-driven default
+      const DEFAULT_TIMEOUT_HOURS = 4; // event-driven default (Sprint 0: 2→4)
       for (const t of openTrades) {
         if (t.stop_loss && t.take_profit) {
           const key = `${t.symbol}:${t.direction}`;
@@ -1234,9 +1269,31 @@ Respond ONLY with a JSON object: {"execute": true/false, "reasoning": "1-2 sente
       const heldMin = (Date.now() - order.openedAt) / 60000;
       if (pnl > 0 && heldMin >= 60) {
         const reversal = await this.checkTrendReversal(order.symbol, order.direction, currentPrice);
+
+        // Telemetry: record every check so we can verify the gate is alive
+        reversalChecks.push({
+          symbol: order.symbol,
+          direction: order.direction,
+          pnl,
+          heldMin,
+          signals: reversal.signals,
+          flipped: reversal.flipped,
+          ts: Date.now(),
+        });
+        if (reversalChecks.length > MAX_REVERSAL_HISTORY) reversalChecks.shift();
+        console.log(`[TrendReversal] ${order.symbol} ${order.direction} pnl=$${pnl.toFixed(2)} held=${heldMin.toFixed(0)}m signals=${reversal.signals} flipped=${reversal.flipped}`);
+
         if (reversal.flipped) {
           shouldClose = true;
           reason = `Trend reversal (${reversal.signals}, profit $${pnl.toFixed(2)} locked)`;
+          await this.telegram.sendMessage(
+            `🔄 <b>Trend Reversal — Early Exit</b>\n\n` +
+            `<b>${order.direction} ${order.symbol}</b>\n` +
+            `Held: ${heldMin.toFixed(0)} min\n` +
+            `Signals flipped: <code>${reversal.signals}</code>\n` +
+            `📈 Locked profit: <b>+$${pnl.toFixed(2)}</b>\n` +
+            `Closing at market...`
+          );
         }
       }
 
