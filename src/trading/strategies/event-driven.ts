@@ -7,11 +7,12 @@
  * 1. Only trade HIGH magnitude events (>0.6)
  * 2. LLM must have HIGH confidence (>0.7)
  * 3. Quant filter must confirm (RSI not extreme, volume spiking, price not already moved)
- * 4. RSI momentum gate (Sprint 2A): SHORT requires RSI≥45 (no oversold bounce trap),
- *    LONG requires RSI≥45 (no falling-knife catch). Both directions need confirming momentum.
- * 5. Anti-bounce: block SHORT if vol<0.5 (no panic-sell)
- * 6. Execute within 60 seconds of event detection
- * 7. Tight SL (1.5x ATR), TP 1.8x ATR — realistic for 4h holding
+ * 4. RSI momentum gate (Sprint 2A): SHORT/LONG require RSI≥45
+ * 5. Volume gates: SHORT vol≥0.5 (panic-sell), LONG vol≥0.7 (buying pressure)
+ * 6. Trend confirmation (Sprint 2B): ADX≥18 — no range markets
+ * 7. Volatility gate (Sprint 2B): ATR%≥0.4% — TP must be reachable in 4h
+ * 8. Execute within 60 seconds of event detection
+ * 9. Tight SL (1.5x ATR), TP 1.8x ATR — realistic for 4h holding
  */
 
 import { SentimentSignal } from '../../sentiment/types';
@@ -116,7 +117,31 @@ export function evaluateEventSignal(
     return reject(symbol, `Anti-bounce: SHORT blocked, vol=${volumeRatio.toFixed(2)}x (no panic-sell)`, indicators);
   }
 
-  // --- Gate 7: Trend alignment (bonus, not required) ---
+  // --- Gate 7: LONG buying-pressure (Sprint 2B) ---
+  // Data 25/04: 2 BTC LONG aperti con vol 0.53 e 0.70 → entrambi timeout perdita.
+  // Senza domanda confermata, i LONG su news positive si afflosciano.
+  // Soglia 0.7 (più permissiva del SHORT 0.5) — i LONG hanno più bisogno di buying pressure.
+  if (direction === 'LONG' && volumeRatio < 0.7) {
+    return reject(symbol, `LONG blocked: vol=${volumeRatio.toFixed(2)}x (no buying pressure, need ≥0.7)`, indicators);
+  }
+
+  // --- Gate 8: ADX minimo — serve un trend confermato (Sprint 2B) ---
+  // Data 25/04: BTC LONG con ADX 9.6 e 18.6 → mercato range, TP irraggiungibile.
+  // ADX <18 = trend troppo debole/inesistente per un trade event-driven a 4h.
+  if (adxRes.adx < 18) {
+    return reject(symbol, `Trend troppo debole (ADX=${adxRes.adx.toFixed(0)}<18, mercato range)`, indicators);
+  }
+
+  // --- Gate 9: ATR% minimo — serve volatilità sufficiente per il TP (Sprint 2B) ---
+  // Data 25/04: BTC LONG con ATR 0.22% e 0.24% → TP a 1.8x ATR ≈ 0.43% movimento.
+  // In 4h con mercato piatto BTC non fa 0.43%, quindi timeout garantito.
+  // Soglia 0.4% perché TP 1.8x ATR = 0.72% movimento richiesto, ragionevole in 4h.
+  const atrPct = (atr / currentPrice) * 100;
+  if (atrPct < 0.4) {
+    return reject(symbol, `Volatilità insufficiente (ATR=${atrPct.toFixed(2)}%<0.4%, TP irraggiungibile in 4h)`, indicators);
+  }
+
+  // --- Gate 10: Trend alignment (bonus, not required) ---
   const ema20 = calculateEMA(closes, 20);
   const lastEma20 = ema20[ema20.length - 1];
   let trendBonus = 0;
