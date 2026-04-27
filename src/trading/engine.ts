@@ -914,7 +914,7 @@ export class TradingEngine {
         direction: setup.direction,
         passed: composite.approved,
         value: composite.score,
-        threshold: 60,
+        threshold: 65,
         reason: composite.approved ? null : 'composite_below_threshold',
       });
     }
@@ -926,7 +926,7 @@ export class TradingEngine {
         sentiment: signal.sentimentScore,
         magnitude: signal.magnitude,
         headline: item.text.slice(0, 200),
-        action: `SKIP: Composite ${composite.score}/100 (min 60)`,
+        action: `SKIP: Composite ${composite.score}/100 (min 65)`,
       });
       return;
     }

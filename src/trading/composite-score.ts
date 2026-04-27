@@ -194,16 +194,17 @@ export function calculateCompositeScore(
     regimeScore * weights.regime
   );
 
-  // Size multiplier based on score (A1.5: gate raised to 60).
+  // Size multiplier based on score (mini-Step 2 2026-04-27: gate raised 60 → 65
+  // after telemetry showed avg pass score 69.5 — the 60 threshold filtered nothing).
   let sizeMultiplier: number;
   if (score >= 80) sizeMultiplier = 1.0;
-  else if (score >= 60) sizeMultiplier = 0.7;
+  else if (score >= 65) sizeMultiplier = 0.7;
   else sizeMultiplier = 0;
 
-  const approved = score >= 60;
+  const approved = score >= 65;
   const reason = approved
     ? `Score ${score}/100 (Sent:${sentimentScore.toFixed(0)} Mom:${momentumScore.toFixed(0)} Vol:${volatilityScore.toFixed(0)} Trend:${trendScore.toFixed(0)} Reg:${regimeScore.toFixed(0)})`
-    : `Score too low: ${score}/100 (min 60)`;
+    : `Score too low: ${score}/100 (min 65)`;
 
   return {
     score,

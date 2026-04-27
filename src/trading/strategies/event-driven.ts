@@ -4,15 +4,17 @@
  * Flow: News event detected → LLM classifies → Quant filter confirms → Trade
  *
  * Key rules:
- * 1. Only trade HIGH magnitude events (>0.6)
+ * 1. Only trade HIGH magnitude events (>0.5)
  * 2. LLM must have HIGH confidence (>0.7)
- * 3. Quant filter must confirm (RSI not extreme, volume spiking, price not already moved)
- * 4. RSI momentum gate (Sprint 2A): SHORT/LONG require RSI≥45
- * 5. Volume gates: SHORT vol≥0.5 (panic-sell), LONG vol≥0.7 (buying pressure)
- * 6. Trend confirmation (Sprint 2B): ADX≥18 — no range markets
- * 7. Volatility gate (Sprint 2B): ATR%≥0.4% — TP must be reachable in 4h
- * 8. Execute within 60 seconds of event detection
- * 9. Tight SL (1.5x ATR), TP 1.8x ATR — realistic for 4h holding
+ * 3. Sentiment direction clear (|score| > 0.3)
+ * 4. Recent move <3% (was 6% — tightened after telemetry showed 6% never fires)
+ * 5. RSI momentum gate (Sprint 2A): SHORT/LONG require RSI≥45 — also subsumes
+ *    the old extreme-RSI gate (removed: 0 fires in 24h of telemetry)
+ * 6. Volume gates: SHORT vol≥0.5 (panic-sell), LONG vol≥0.7 (buying pressure)
+ * 7. Trend confirmation (Sprint 2B): ADX≥18 — no range markets
+ * 8. Volatility gate (Sprint 2B): ATR%≥0.4% — TP must be reachable in 4h
+ * 9. Execute within 60 seconds of event detection
+ * 10. Tight SL (1.5x ATR), TP 1.8x ATR — realistic for 4h holding
  */
 
 import { SentimentSignal } from '../../sentiment/types';
@@ -108,30 +110,25 @@ export function evaluateEventSignal(
   const direction: 'LONG' | 'SHORT' =
     signal.sentimentScore > 0 ? 'LONG' : 'SHORT';
 
-  // --- Gate 4: RSI not at extreme in trade direction ---
-  if (direction === 'LONG' && rsi > 75) {
-    failCheck('rsi_extreme', rsi, 75, 'rsi_too_high_for_long');
-    return reject(symbol, `RSI too high for LONG (${rsi.toFixed(0)})`, indicators, checks);
-  }
-  if (direction === 'SHORT' && rsi < 25) {
-    failCheck('rsi_extreme', rsi, 25, 'rsi_too_low_for_short');
-    return reject(symbol, `RSI too low for SHORT (${rsi.toFixed(0)})`, indicators, checks);
-  }
-  passCheck('rsi_extreme', rsi, direction === 'LONG' ? 75 : 25);
+  // Gate 4 (rsi_extreme) REMOVED 2026-04-27 — telemetry showed 0/24 reject in 24h.
+  // The extreme bands (LONG>75, SHORT<25) are fully subsumed by G6 (rsi_momentum ≥45),
+  // which blocks both falling-knife LONG and oversold SHORT in a single check.
 
   // --- Gate 5: Price hasn't already moved too much ---
+  // Tightened 2026-04-27: 6% → 3% (telemetry showed avg 0.7%, max 1.76% in 24h
+  // — 6% threshold was never hit; 3% still permissive, captures genuine spikes).
   let recentMovePct = 0;
   if (closes.length >= 4) {
     const recentMove = Math.abs(
       (closes[closes.length - 1] - closes[closes.length - 4]) / closes[closes.length - 4]
     );
     recentMovePct = recentMove * 100;
-    if (recentMove > 0.06) {
-      failCheck('move_recent', recentMovePct, 6, 'price_already_moved');
-      return reject(symbol, `Price already moved ${recentMovePct.toFixed(1)}% (>6%)`, indicators, checks);
+    if (recentMove > 0.03) {
+      failCheck('move_recent', recentMovePct, 3, 'price_already_moved');
+      return reject(symbol, `Price already moved ${recentMovePct.toFixed(1)}% (>3%)`, indicators, checks);
     }
   }
-  passCheck('move_recent', recentMovePct, 6);
+  passCheck('move_recent', recentMovePct, 3);
 
   // --- Gate 6: RSI direction-momentum gate (Sprint 2A) ---
   if (direction === 'SHORT' && rsi < 45) {
