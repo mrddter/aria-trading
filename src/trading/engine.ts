@@ -487,6 +487,61 @@ export class TradingEngine {
    *   3. Price has crossed EMA20 against the trade
    * Used by checkSoftOrders to early-exit profitable positions before they decay.
    */
+  /**
+   * Macro regime check: looks at BTC 24h % change as the dominant market direction.
+   * Returns one of:
+   *   - 'BULL': BTC 24h > +1.5%
+   *   - 'BEAR': BTC 24h < -1.5%
+   *   - 'NEUTRAL': otherwise
+   *
+   * Cached for 10 minutes via Cache API to avoid duplicate fetches per cron cycle.
+   * Returns 'NEUTRAL' on any fetch error (fail-safe: never block trades on infra issues).
+   */
+  private async checkMacroRegime(): Promise<{ regime: 'BULL' | 'BEAR' | 'NEUTRAL'; btcPct24h: number }> {
+    const cacheKey = 'https://aria-internal.cache/macro-btc-24h';
+    const cache = (caches as any).default as Cache | undefined;
+
+    if (cache) {
+      try {
+        const cached = await cache.match(cacheKey);
+        if (cached) {
+          const json = await cached.json() as { btcPct24h: number };
+          return classifyRegime(json.btcPct24h);
+        }
+      } catch { /* fall through */ }
+    }
+
+    try {
+      const klines = await this.exchange.getKlines('BTCUSDT', '1h', 25);
+      if (!klines || klines.length < 25) return { regime: 'NEUTRAL', btcPct24h: 0 };
+      const closes = klines.map((k: any) => parseFloat(k[4]));
+      const now = closes[closes.length - 1];
+      const ago24h = closes[0];
+      const btcPct24h = ago24h > 0 ? ((now - ago24h) / ago24h) * 100 : 0;
+
+      if (cache) {
+        try {
+          const resp = new Response(JSON.stringify({ btcPct24h }), {
+            headers: { 'Content-Type': 'application/json', 'Cache-Control': 'max-age=600' },
+          });
+          await cache.put(cacheKey, resp);
+        } catch { /* best effort */ }
+      }
+
+      return classifyRegime(btcPct24h);
+    } catch {
+      return { regime: 'NEUTRAL', btcPct24h: 0 };
+    }
+
+    function classifyRegime(btcPct24h: number): { regime: 'BULL' | 'BEAR' | 'NEUTRAL'; btcPct24h: number } {
+      const regime: 'BULL' | 'BEAR' | 'NEUTRAL' =
+        btcPct24h > 1.5 ? 'BULL'
+        : btcPct24h < -1.5 ? 'BEAR'
+        : 'NEUTRAL';
+      return { regime, btcPct24h };
+    }
+  }
+
   private async checkTrendReversal(
     symbol: string,
     direction: 'LONG' | 'SHORT',
@@ -873,6 +928,90 @@ export class TradingEngine {
     if (!setup.approved) {
       console.log(`[Event] Filtered: ${setup.reason}`);
       return;
+    }
+
+    // ---- MACRO REGIME OVERRIDE (Strada 3 + Strada 1, 2026-05-02) ----
+    // Two consecutive bearish weeks with 0% WR on LONGs proved the LLM sensor
+    // misreads news polarity in directional macro markets. Use BTC 24h trend as
+    // the dominant compass:
+    //   - BEAR macro (BTC 24h < -1.5%) + LONG setup:
+    //       * if asset is also down >0.5% in 4h → INVERT to SHORT (market confirms)
+    //       * else → SKIP (asset not yet confirming, too uncertain)
+    //   - BULL macro (BTC 24h > +1.5%) + SHORT setup: symmetric
+    //   - NEUTRAL macro: no override, original direction stands
+    //
+    // The "double confirmation" (macro + asset 4h) prevents random inversions
+    // when only the macro is moving but the specific asset isn't.
+    const macro = await this.checkMacroRegime();
+    const assetPct4h = priceContext?.pct4h ?? 0;
+    let macroAction: 'inverted' | 'skipped' | 'pass' = 'pass';
+    let originalDirection: 'LONG' | 'SHORT' = setup.direction;
+
+    if (macro.regime === 'BEAR' && setup.direction === 'LONG') {
+      if (assetPct4h < -0.5) {
+        // Asset confirms bear momentum → invert to SHORT
+        setup.direction = 'SHORT';
+        // Recompute SL/TP for the inverted direction (mirror around current price)
+        const slDist = Math.abs(currentPrice - setup.stopLoss);
+        const tpDist = Math.abs(setup.takeProfit - currentPrice);
+        setup.stopLoss = currentPrice + slDist;
+        setup.takeProfit = currentPrice - tpDist;
+        macroAction = 'inverted';
+        console.log(`[Macro] BEAR regime (BTC 24h ${macro.btcPct24h.toFixed(2)}%) + asset 4h ${assetPct4h.toFixed(2)}% → INVERT LONG→SHORT for ${symbol}`);
+      } else {
+        macroAction = 'skipped';
+        console.log(`[Macro] BEAR regime (BTC 24h ${macro.btcPct24h.toFixed(2)}%) but asset 4h ${assetPct4h.toFixed(2)}% not confirming → SKIP LONG ${symbol}`);
+      }
+    } else if (macro.regime === 'BULL' && setup.direction === 'SHORT') {
+      if (assetPct4h > 0.5) {
+        setup.direction = 'LONG';
+        const slDist = Math.abs(setup.stopLoss - currentPrice);
+        const tpDist = Math.abs(currentPrice - setup.takeProfit);
+        setup.stopLoss = currentPrice - slDist;
+        setup.takeProfit = currentPrice + tpDist;
+        macroAction = 'inverted';
+        console.log(`[Macro] BULL regime (BTC 24h ${macro.btcPct24h.toFixed(2)}%) + asset 4h ${assetPct4h.toFixed(2)}% → INVERT SHORT→LONG for ${symbol}`);
+      } else {
+        macroAction = 'skipped';
+        console.log(`[Macro] BULL regime (BTC 24h ${macro.btcPct24h.toFixed(2)}%) but asset 4h ${assetPct4h.toFixed(2)}% not confirming → SKIP SHORT ${symbol}`);
+      }
+    }
+
+    // Telemetry: log every macro check (pass/inverted/skipped) for calibration
+    if (dbForGates) {
+      await logGate(dbForGates, {
+        gateId: 'macro_regime',
+        asset: signal.asset,
+        direction: setup.direction,
+        passed: macroAction !== 'skipped',
+        value: macro.btcPct24h,
+        threshold: macro.regime === 'BEAR' ? -1.5 : macro.regime === 'BULL' ? 1.5 : 0,
+        reason: macroAction === 'pass'
+          ? `${macro.regime}_no_override`
+          : macroAction === 'inverted'
+            ? `inverted_${originalDirection}_to_${setup.direction}_asset4h_${assetPct4h.toFixed(2)}`
+            : `skipped_${originalDirection}_in_${macro.regime}_asset4h_${assetPct4h.toFixed(2)}`,
+      });
+    }
+
+    if (macroAction === 'skipped') {
+      await this.telegram.sendMessage(
+        `⛔ <b>${signal.asset} ${originalDirection} SKIPPED — Macro override</b>\n\n` +
+        `Macro: <code>${macro.regime}</code> (BTC 24h ${macro.btcPct24h.toFixed(2)}%)\n` +
+        `Asset 4h: <code>${assetPct4h.toFixed(2)}%</code> (not confirming)\n` +
+        `<b>Reason:</b> direction conflicts with macro, asset not confirming`
+      );
+      return;
+    }
+
+    if (macroAction === 'inverted') {
+      await this.telegram.sendMessage(
+        `🔄 <b>${signal.asset} DIRECTION INVERTED — Macro override</b>\n\n` +
+        `Original: <code>${originalDirection}</code> → New: <code>${setup.direction}</code>\n` +
+        `Macro: <code>${macro.regime}</code> (BTC 24h ${macro.btcPct24h.toFixed(2)}%)\n` +
+        `Asset 4h: <code>${assetPct4h.toFixed(2)}%</code> (confirms inversion)\n` +
+        `New SL: $${setup.stopLoss.toFixed(4)} | TP: $${setup.takeProfit.toFixed(4)}`
+      );
     }
 
     // ---- F&G ASYMMETRIC GATE (Sprint 2A) ----
