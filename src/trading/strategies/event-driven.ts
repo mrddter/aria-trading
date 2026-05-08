@@ -3,20 +3,19 @@
  *
  * Flow: News event detected → LLM classifies → Quant filter confirms → Trade
  *
- * Key rules (after mini-Step 2 round 3, 2026-04-29):
+ * Key rules (after 2026-05-08 update):
  * 1. Only trade HIGH magnitude events (>0.5)
  * 2. LLM must have HIGH confidence (>0.7)
  * 3. Sentiment direction clear (|score| > 0.3)
- * 4. RSI momentum: SHORT/LONG require RSI≥42
- * 5. Volume gates: SHORT vol≥0.5 (panic-sell), LONG vol≥0.6 (buying pressure)
- * 6. Trade feasibility: ATR%≥0.3 floor + max 4h historical move ≥ 1.2× TP distance
- *    (single gate replaces old separate ATR% and ADX gates — measures directly
- *    whether the TP is statistically reachable in the 4h holding window)
- * 7. Execute within 60 seconds of event detection
- * 8. Tight SL (1.5x ATR), TP 1.8x ATR — realistic for 4h holding
+ * 4. RSI extreme top/bottom-tick: LONG<72, SHORT>28 — RE-INTRODUCED after
+ *    2 fast-SL losses on overbought LONG (BNB RSI 86, XRP RSI 77 on 2026-05-06)
+ * 5. RSI momentum: SHORT/LONG require RSI≥42
+ * 6. Volume gates: SHORT vol≥0.5 (panic-sell), LONG vol≥0.6 (buying pressure)
+ * 7. Trade feasibility: ATR%≥0.3 floor + max 4h historical move ≥ 1.2× TP distance
+ * 8. Execute within 60 seconds of event detection
+ * 9. Tight SL (1.5x ATR), TP 1.8x ATR — realistic for 4h holding
  *
  * Removed gates (telemetry showed 0 effective filtering or full subsumption):
- *   - rsi_extreme (LONG>75, SHORT<25): subsumed by RSI momentum
  *   - move_recent (>3%): never triggered in production
  *   - adx_min (≥18): subsumed by RSI momentum + volume gates (0/10 reject in 48h)
  */
@@ -120,9 +119,21 @@ export function evaluateEventSignal(
     signal.sentimentScore > 0 ? 'LONG' : 'SHORT';
   dirRef.current = direction;
 
-  // Gate 4 (rsi_extreme) REMOVED 2026-04-27 — telemetry showed 0/24 reject in 24h.
-  // The extreme bands (LONG>75, SHORT<25) are fully subsumed by G6 (rsi_momentum ≥45),
-  // which blocks both falling-knife LONG and oversold SHORT in a single check.
+  // --- Gate 4: RSI extreme top-tick / bottom-tick (RE-INTRODUCED 2026-05-08) ---
+  // Originally removed 2026-04-27 (0/24 reject at LONG>75/SHORT<25). Brought back
+  // with tighter bands after 2 fast-SL losses on 2026-05-06: BNB LONG with RSI 86
+  // (-$0.12 in 0.58h) and XRP LONG with RSI 77 (-$0.12 in 0.99h). Both were classic
+  // "buy at top" trades — strong trend + extreme RSI = exhausted move, mean-reversion
+  // imminent. Soglia 72 LONG avrebbe bloccato entrambi.
+  if (direction === 'LONG' && rsi > 72) {
+    failCheck('rsi_extreme', rsi, 72, 'rsi_overbought_top_tick');
+    return reject(symbol, `LONG blocked: RSI=${rsi.toFixed(0)}>72 (overbought, top-tick risk)`, indicators, checks);
+  }
+  if (direction === 'SHORT' && rsi < 28) {
+    failCheck('rsi_extreme', rsi, 28, 'rsi_oversold_bottom_tick');
+    return reject(symbol, `SHORT blocked: RSI=${rsi.toFixed(0)}<28 (oversold, bottom-tick risk)`, indicators, checks);
+  }
+  passCheck('rsi_extreme', rsi, direction === 'LONG' ? 72 : 28);
 
   // Gate 5 (move_recent) REMOVED 2026-04-27 — 0/65 reject in 24h after lowering to 3%.
   // Avg observed 0.44%, max 1.46%. Even 3% threshold never fires; the gate is dead.
