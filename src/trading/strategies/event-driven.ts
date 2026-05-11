@@ -3,12 +3,13 @@
  *
  * Flow: News event detected → LLM classifies → Quant filter confirms → Trade
  *
- * Key rules (after 2026-05-08 update):
+ * Key rules (after 2026-05-11 update):
  * 1. Only trade HIGH magnitude events (>0.5)
  * 2. LLM must have HIGH confidence (>0.7)
  * 3. Sentiment direction clear (|score| > 0.3)
- * 4. RSI extreme top/bottom-tick: LONG<72, SHORT>28 — RE-INTRODUCED after
- *    2 fast-SL losses on overbought LONG (BNB RSI 86, XRP RSI 77 on 2026-05-06)
+ * 4. RSI extreme top/bottom-tick: LONG<72, SHORT>28
+ * 4b. RSI+ADX exhaustion: LONG blocked if RSI≥65 AND ADX≥40 (and symmetric
+ *     for SHORT) — catches over-extended moves before absolute extremes
  * 5. RSI momentum: SHORT/LONG require RSI≥42
  * 6. Volume gates: SHORT vol≥0.5 (panic-sell), LONG vol≥0.6 (buying pressure)
  * 7. Trade feasibility: ATR%≥0.3 floor + max 4h historical move ≥ 1.2× TP distance
@@ -134,6 +135,25 @@ export function evaluateEventSignal(
     return reject(symbol, `SHORT blocked: RSI=${rsi.toFixed(0)}<28 (oversold, bottom-tick risk)`, indicators, checks);
   }
   passCheck('rsi_extreme', rsi, direction === 'LONG' ? 72 : 28);
+
+  // --- Gate 4b: RSI + ADX exhaustion (NEW 2026-05-11) ---
+  // Top-tick (or bottom-tick) BEFORE the absolute extreme. Pattern observed
+  // on 12 LONG trades since 02/05:
+  //   - RSI 65-72 + ADX ≥40: SUI (RSI 69 ADX 44) -$0.25, BNB (86, 47) -$0.12,
+  //     XRP (77, 44) -$0.12. All fast-SL within 2h, exhaustion moves.
+  //   - RSI 60-65 + ADX <40: 4/4 winners or break-even (AVAX, XRP, LINK).
+  // The combo "elevated RSI + very strong trend" signals an over-extended
+  // move where mean reversion is imminent. Symmetric for SHORT on the
+  // oversold side.
+  if (direction === 'LONG' && rsi >= 65 && adxRes.adx >= 40) {
+    failCheck('rsi_adx_exhaustion', rsi, 65, `exhaustion_long_rsi${rsi.toFixed(0)}_adx${adxRes.adx.toFixed(0)}`);
+    return reject(symbol, `LONG blocked: RSI=${rsi.toFixed(0)} + ADX=${adxRes.adx.toFixed(0)} (trend exhaustion, mean-reversion risk)`, indicators, checks);
+  }
+  if (direction === 'SHORT' && rsi <= 35 && adxRes.adx >= 40) {
+    failCheck('rsi_adx_exhaustion', rsi, 35, `exhaustion_short_rsi${rsi.toFixed(0)}_adx${adxRes.adx.toFixed(0)}`);
+    return reject(symbol, `SHORT blocked: RSI=${rsi.toFixed(0)} + ADX=${adxRes.adx.toFixed(0)} (trend exhaustion, bounce risk)`, indicators, checks);
+  }
+  passCheck('rsi_adx_exhaustion', rsi, direction === 'LONG' ? 65 : 35);
 
   // Gate 5 (move_recent) REMOVED 2026-04-27 — 0/65 reject in 24h after lowering to 3%.
   // Avg observed 0.44%, max 1.46%. Even 3% threshold never fires; the gate is dead.
